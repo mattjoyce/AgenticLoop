@@ -577,5 +577,11 @@ func (l *Loop) rebuildToolsWithObserver(ws *Workspace) []tool.BaseTool {
 			wrapped = append(wrapped, t)
 		}
 	}
+
+	// Add workspace file tools sandboxed to the run's workspace directory.
+	for _, wt := range localtools.BuildWorkspaceTools(ws.Dir()) {
+		wrapped = append(wrapped, wt.WithObserver(observer))
+	}
+
 	return wrapped
 }

@@ -14,17 +14,17 @@ ductile:
   token: "${DUCTILE_TOOL_TOKEN}"
   allowlist:
     - "echo/poll"
-    - "jina-reader/fetch"
+    - "jina-reader/handle"
 
 llm:
-  provider: ollama
-  model: gpt-oss:latest
-  base_url: "http://192.168.20.8:11434"
+  provider: openai
+  model: gpt-5-nano
+  api_key: "${OPENAI_API_KEY}"
 
 agent:
   default_max_loops: 10
   default_deadline: 5m
-  step_timeout: 60s
+  step_timeout: 120s
   max_retry_per_step: 3
   workspace_dir: "./data/workspaces"
   prompts:
@@ -78,8 +78,15 @@ agent:
       <available_tools source="runtime.bound_tools">
       <tool>sys_internal_ip</tool>
       <tool>sys_external_ip</tool>
+      <tool>workspace_write — create/overwrite a file (path, content)</tool>
+      <tool>workspace_read — read a file (path, max_lines)</tool>
+      <tool>workspace_list — list directory entries (path)</tool>
+      <tool>workspace_append — append to a file (path, content)</tool>
+      <tool>workspace_delete — delete a file (path)</tool>
+      <tool>workspace_mkdir — create directory and parents (path)</tool>
       <tool>report_success</tool>
       <note>Additional tools may be available at runtime (for example ductile_*).</note>
+      <note>Workspace tools are sandboxed to the run workspace. Use relative paths only.</note>
       <note>Completion requires calling report_success with summary and evidence.</note>
       </available_tools>
       <output_contract format="markdown">
