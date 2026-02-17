@@ -1,0 +1,28 @@
+service:
+  name: agenticloop
+  log_level: info
+
+database:
+  path: ./data/agenticloop.db
+
+api:
+  listen: "127.0.0.1:8090"
+  token: "${AGENTICLOOP_API_TOKEN}"
+
+ductile:
+  base_url: "http://127.0.0.1:8080"
+  token: "${DUCTILE_TOOL_TOKEN}"
+  allowlist:
+    - "echo/poll"
+    - "jina-reader/fetch"
+
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-20250514
+  api_key: "${ANTHROPIC_API_KEY}"
+
+agent:
+  default_max_loops: 10
+  default_deadline: 5m
+  step_timeout: 60s
+  max_retry_per_step: 3
