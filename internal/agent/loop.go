@@ -91,7 +91,7 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 	}
 
 	if ws != nil {
-		if memory := ws.ReadMemory(); memory != "" {
+		if memory := ws.ReadRunMemory(); memory != "" {
 			state.Memory = clipText(memory, 12000)
 		}
 		if err := ws.WritePromptSnapshot(run.Goal, run.Context, run.Constraints, "staged-prompts: frame, plan, act, reflect"); err != nil {
@@ -115,7 +115,10 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 	for iter := 1; iter <= maxLoops; iter++ {
 		state.Iteration = iter
 		if ws != nil {
-			state.Memory = clipText(ws.ReadMemory(), 12000)
+			state.Memory = clipText(ws.ReadRunMemory(), 12000)
+			if err := ws.ClearLoopMemory(); err != nil {
+				l.logger.Error("failed to clear loop memory", "run_id", run.ID, "iteration", iter, "error", err)
+			}
 		}
 
 		framePrompt := l.renderPrompt(l.cfg.Prompts.Frame, state)
@@ -148,12 +151,21 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 		if ws != nil {
 			_ = ws.AppendStagePrompt(iter, "act", actPrompt)
 		}
-		actOut, err := l.runActStage(ctx, toolset, actPrompt)
+		actResult, err := l.runActStage(ctx, toolset, actPrompt)
 		if err != nil {
 			return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("act stage: %w", err))
 		}
-		state.Act = actOut
-		if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseAct, actOut); err != nil {
+		state.Act = actResult.Summary
+		if actResult.SuccessReported {
+			state.SuccessReported = true
+			if actResult.ReportedSummary != "" {
+				state.SuccessSummary = actResult.ReportedSummary
+			}
+		}
+		if ws != nil {
+			state.LoopMemory = clipText(ws.ReadLoopMemory(), 12000)
+		}
+		if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseAct, actResult.Summary); err != nil {
 			l.logger.Error("failed to persist act summary step", "run_id", run.ID, "error", err)
 		}
 
@@ -170,8 +182,32 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 		}
 
 		decision := parseReflectDecision(reflectOut)
+		if ws != nil {
+			memoryUpdate := strings.TrimSpace(decision.MemoryUpdate)
+			if memoryUpdate == "" {
+				memoryUpdate = strings.TrimSpace(decision.NextFocus)
+			}
+			if memoryUpdate != "" {
+				if err := ws.AppendRunMemory(iter, memoryUpdate); err != nil {
+					l.logger.Error("failed to append run memory", "run_id", run.ID, "iteration", iter, "error", err)
+				}
+			}
+			if err := ws.ClearLoopMemory(); err != nil {
+				l.logger.Error("failed to clear loop memory after reflect", "run_id", run.ID, "iteration", iter, "error", err)
+			}
+		}
+
 		if decision.Done {
+			if !state.SuccessReported {
+				state.NextFocus = "Call report_success with summary and evidence before declaring done."
+				l.logger.Info("reflect requested done but report_success not yet called; continuing", "run_id", run.ID, "iteration", iter)
+				continue
+			}
+
 			summary := strings.TrimSpace(decision.Summary)
+			if summary == "" {
+				summary = strings.TrimSpace(state.SuccessSummary)
+			}
 			if summary == "" {
 				summary = strings.TrimSpace(state.Act)
 			}
@@ -189,26 +225,33 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 		state.NextFocus = decision.NextFocus
 	}
 
+	if !state.SuccessReported {
+		return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("max loops exhausted without required report_success call"))
+	}
 	return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("max loops exhausted without completion"))
 }
 
 type stageState struct {
-	Goal        string
-	Context     string
-	Constraints string
-	Memory      string
-	Frame       string
-	Plan        string
-	Act         string
-	NextFocus   string
-	Iteration   int
-	MaxLoops    int
+	Goal            string
+	Context         string
+	Constraints     string
+	Memory          string
+	LoopMemory      string
+	Frame           string
+	Plan            string
+	Act             string
+	NextFocus       string
+	SuccessReported bool
+	SuccessSummary  string
+	Iteration       int
+	MaxLoops        int
 }
 
 type reflectDecision struct {
-	Done      bool   `json:"done"`
-	Summary   string `json:"summary"`
-	NextFocus string `json:"next_focus"`
+	Done         bool   `json:"done"`
+	Summary      string `json:"summary"`
+	NextFocus    string `json:"next_focus"`
+	MemoryUpdate string `json:"memory_update"`
 }
 
 type preparedToolset struct {
@@ -252,12 +295,19 @@ func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (
 	return strings.TrimSpace(resp.Content), nil
 }
 
-func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt string) (string, error) {
+type actStageResult struct {
+	Summary         string
+	SuccessReported bool
+	ReportedSummary string
+}
+
+func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt string) (actStageResult, error) {
 	messages := []*schema.Message{
 		schema.SystemMessage(prompt),
 		schema.UserMessage("Execute the action now. Use tools when needed, then summarize what you accomplished."),
 	}
 
+	result := actStageResult{}
 	var transcript strings.Builder
 	const maxRounds = 6
 	toolSeq := 0
@@ -265,7 +315,7 @@ func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt
 	for round := 1; round <= maxRounds; round++ {
 		resp, err := toolset.model.Generate(ctx, messages)
 		if err != nil {
-			return "", err
+			return result, err
 		}
 		messages = append(messages, resp)
 
@@ -278,9 +328,11 @@ func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt
 				transcript.WriteString(content)
 			}
 			if strings.TrimSpace(transcript.String()) != "" {
-				return strings.TrimSpace(transcript.String()), nil
+				result.Summary = strings.TrimSpace(transcript.String())
+				return result, nil
 			}
-			return "No actionable output produced.", nil
+			result.Summary = "No actionable output produced."
+			return result, nil
 		}
 
 		for _, tc := range resp.ToolCalls {
@@ -302,6 +354,11 @@ func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt
 			if runErr != nil {
 				e := runErr.Error()
 				obsJSON = mustJSON(map[string]string{"error": e})
+			} else if name == "report_success" {
+				result.SuccessReported = true
+				if summary := extractSummaryFromArguments(arguments); summary != "" {
+					result.ReportedSummary = summary
+				}
 			}
 
 			messages = append(messages, schema.ToolMessage(string(obsJSON), toolCallID(tc, name, toolSeq)))
@@ -309,7 +366,8 @@ func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt
 		}
 	}
 
-	return strings.TrimSpace(transcript.String()), nil
+	result.Summary = strings.TrimSpace(transcript.String())
+	return result, nil
 }
 
 func (l *Loop) appendTextStep(ctx context.Context, runID string, stepNum *int, phase store.StepPhase, content string) error {
@@ -423,10 +481,20 @@ func parseReflectDecision(raw string) reflectDecision {
 	return reflectDecision{Done: false, Summary: text}
 }
 
+func extractSummaryFromArguments(arguments json.RawMessage) string {
+	var payload struct {
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal(arguments, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Summary)
+}
+
 func (l *Loop) rebuildToolsWithObserver(ws *Workspace) []tool.BaseTool {
 	observer := func(toolName, input, output, status string) {
-		if err := ws.AppendToolCall(toolName, input, output, status); err != nil {
-			l.logger.Error("failed to write workspace memory", "tool", toolName, "error", err)
+		if err := ws.AppendLoopToolCall(toolName, input, output, status); err != nil {
+			l.logger.Error("failed to write loop memory", "tool", toolName, "error", err)
 		}
 	}
 
@@ -436,6 +504,8 @@ func (l *Loop) rebuildToolsWithObserver(ws *Workspace) []tool.BaseTool {
 			wrapped = append(wrapped, dt.WithObserver(observer))
 		} else if st, ok := t.(*localtools.CommandTool); ok {
 			wrapped = append(wrapped, st.WithObserver(observer))
+		} else if rs, ok := t.(*localtools.ReportSuccessTool); ok {
+			wrapped = append(wrapped, rs.WithObserver(observer))
 		} else {
 			wrapped = append(wrapped, t)
 		}

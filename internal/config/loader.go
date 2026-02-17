@@ -71,7 +71,7 @@ func applyDefaults(cfg *Config) {
 <constraints source="run.constraints">{{.Constraints}}</constraints>
 <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
 <next_focus source="stage.reflect">{{.NextFocus}}</next_focus>
-<memory source="workspace.memory">{{.Memory}}</memory>
+<run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
 </run_context>
 <output_contract format="markdown">
 Return concise markdown with:
@@ -91,6 +91,7 @@ Return concise markdown with:
 <constraints source="run.constraints">{{.Constraints}}</constraints>
 <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
 <next_focus source="stage.reflect">{{.NextFocus}}</next_focus>
+<run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
 </run_context>
 <frame_output source="stage.frame">{{.Frame}}</frame_output>
 <output_contract format="markdown">
@@ -106,14 +107,16 @@ Return a short numbered plan for this loop. Prefer one concrete next action.
 <static_context source="run.context">{{.Context}}</static_context>
 <constraints source="run.constraints">{{.Constraints}}</constraints>
 <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
-<memory source="workspace.memory">{{.Memory}}</memory>
+<run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
 </run_context>
 <frame_output source="stage.frame">{{.Frame}}</frame_output>
 <plan_output source="stage.plan">{{.Plan}}</plan_output>
 <available_tools source="runtime.bound_tools">
 <tool>sys_internal_ip</tool>
 <tool>sys_external_ip</tool>
+<tool>report_success</tool>
 <note>Additional tools may be available at runtime (for example ductile_*).</note>
+<note>Completion requires calling report_success with summary and evidence.</note>
 </available_tools>
 <output_contract format="markdown">
 Execute the best next action. Use tools when needed.
@@ -127,13 +130,18 @@ When complete for this loop, provide a concise action result.
 <run_context version="1">
 <goal source="run.goal">{{.Goal}}</goal>
 <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
+<run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
+<loop_memory source="workspace.loop_memory">{{.LoopMemory}}</loop_memory>
 </run_context>
 <frame_output source="stage.frame">{{.Frame}}</frame_output>
 <plan_output source="stage.plan">{{.Plan}}</plan_output>
 <act_output source="stage.act">{{.Act}}</act_output>
+<completion_gate success_tool="report_success" success_tool_called="{{.SuccessReported}}">
+<reported_summary>{{.SuccessSummary}}</reported_summary>
+</completion_gate>
 <output_contract format="json">
 Return JSON only:
-{"done": boolean, "summary": "string", "next_focus": "string"}
+{"done": boolean, "summary": "string", "next_focus": "string", "memory_update": "string"}
 </output_contract>
 </stage>`
 	}

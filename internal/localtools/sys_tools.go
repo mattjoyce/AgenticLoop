@@ -23,6 +23,12 @@ type CommandTool struct {
 }
 
 var _ tool.InvokableTool = (*CommandTool)(nil)
+var _ tool.InvokableTool = (*ReportSuccessTool)(nil)
+
+// ReportSuccessTool records an explicit completion signal from the model.
+type ReportSuccessTool struct {
+	observer Observer
+}
 
 // BuildDefaultTools returns the built-in local diagnostic tools.
 func BuildDefaultTools() []tool.BaseTool {
@@ -37,6 +43,7 @@ func BuildDefaultTools() []tool.BaseTool {
 			description: "Get external/public IP info via curl ifconfig.me/all.json.",
 			runner:      runExternalIP,
 		},
+		&ReportSuccessTool{},
 	}
 }
 
@@ -48,6 +55,11 @@ func (t *CommandTool) WithObserver(obs Observer) *CommandTool {
 		runner:      t.runner,
 		observer:    obs,
 	}
+}
+
+// WithObserver returns a copy of report_success with the given observer.
+func (t *ReportSuccessTool) WithObserver(obs Observer) *ReportSuccessTool {
+	return &ReportSuccessTool{observer: obs}
 }
 
 // Info returns tool metadata for model planning.
@@ -84,6 +96,56 @@ func (t *CommandTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 		t.observer(t.name, argumentsInJSON, string(out), status)
 	}
 
+	return string(out), nil
+}
+
+// Info returns metadata for the report_success tool.
+func (t *ReportSuccessTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "report_success",
+		Desc: "Explicitly report successful completion with summary and evidence. Must be called before run completion.",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"summary": {
+				Type: schema.String,
+				Desc: "Concise final summary of the completed task",
+			},
+			"evidence": {
+				Type: schema.String,
+				Desc: "Brief evidence backing the completion claim",
+			},
+		}),
+	}, nil
+}
+
+// InvokableRun validates and records completion details.
+func (t *ReportSuccessTool) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	var args struct {
+		Summary  string `json:"summary"`
+		Evidence string `json:"evidence"`
+	}
+	if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
+		return "", fmt.Errorf("parse report_success arguments: %w", err)
+	}
+	if args.Summary == "" {
+		return "", fmt.Errorf("report_success.summary is required")
+	}
+	if args.Evidence == "" {
+		return "", fmt.Errorf("report_success.evidence is required")
+	}
+
+	out, err := json.Marshal(map[string]any{
+		"status":   "ok",
+		"accepted": true,
+		"summary":  args.Summary,
+		"evidence": args.Evidence,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal report_success output: %w", err)
+	}
+
+	if t.observer != nil {
+		t.observer("report_success", argumentsInJSON, string(out), "ok")
+	}
 	return string(out), nil
 }
 

@@ -11,9 +11,10 @@ import (
 
 // Workspace manages a per-run directory with a memory file for inter-loop context.
 type Workspace struct {
-	dir        string
-	memoryPath string
-	promptPath string
+	dir            string
+	runMemoryPath  string
+	loopMemoryPath string
+	promptPath     string
 }
 
 // NewWorkspace creates a workspace directory for a run.
@@ -23,17 +24,18 @@ func NewWorkspace(baseDir, runID string) (*Workspace, error) {
 		return nil, fmt.Errorf("create workspace: %w", err)
 	}
 	return &Workspace{
-		dir:        dir,
-		memoryPath: filepath.Join(dir, "memory.md"),
-		promptPath: filepath.Join(dir, "prompt.md"),
+		dir:            dir,
+		runMemoryPath:  filepath.Join(dir, "run_memory.md"),
+		loopMemoryPath: filepath.Join(dir, "loop_memory.md"),
+		promptPath:     filepath.Join(dir, "prompt.md"),
 	}, nil
 }
 
-// AppendToolCall records a tool invocation and its result to the memory file.
-func (w *Workspace) AppendToolCall(tool, input, output, status string) error {
-	f, err := os.OpenFile(w.memoryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+// AppendLoopToolCall records a tool invocation and its result to the per-loop memory file.
+func (w *Workspace) AppendLoopToolCall(tool, input, output, status string) error {
+	f, err := os.OpenFile(w.loopMemoryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return fmt.Errorf("open memory file: %w", err)
+		return fmt.Errorf("open loop memory file: %w", err)
 	}
 	defer f.Close()
 
@@ -41,14 +43,49 @@ func (w *Workspace) AppendToolCall(tool, input, output, status string) error {
 		time.Now().UTC().Format(time.RFC3339), tool, status, input, output)
 
 	if _, err := f.WriteString(entry); err != nil {
-		return fmt.Errorf("write memory entry: %w", err)
+		return fmt.Errorf("write loop memory entry: %w", err)
 	}
 	return nil
 }
 
-// ReadMemory returns the full contents of the memory file, or empty string if none.
-func (w *Workspace) ReadMemory() string {
-	data, err := os.ReadFile(w.memoryPath)
+// ReadLoopMemory returns the full contents of loop memory.
+func (w *Workspace) ReadLoopMemory() string {
+	data, err := os.ReadFile(w.loopMemoryPath)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// ClearLoopMemory truncates loop memory so the next iteration starts clean.
+func (w *Workspace) ClearLoopMemory() error {
+	if err := os.WriteFile(w.loopMemoryPath, []byte(""), 0o644); err != nil {
+		return fmt.Errorf("clear loop memory: %w", err)
+	}
+	return nil
+}
+
+// AppendRunMemory appends distilled reflective memory for cross-loop context.
+func (w *Workspace) AppendRunMemory(iteration int, text string) error {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	f, err := os.OpenFile(w.runMemoryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open run memory file: %w", err)
+	}
+	defer f.Close()
+
+	entry := fmt.Sprintf("## Iteration %d — %s\n%s\n\n", iteration, time.Now().UTC().Format(time.RFC3339), strings.TrimSpace(text))
+	if _, err := f.WriteString(entry); err != nil {
+		return fmt.Errorf("write run memory entry: %w", err)
+	}
+	return nil
+}
+
+// ReadRunMemory returns the full contents of persistent run memory.
+func (w *Workspace) ReadRunMemory() string {
+	data, err := os.ReadFile(w.runMemoryPath)
 	if err != nil {
 		return ""
 	}
