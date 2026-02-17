@@ -28,6 +28,7 @@ type Runner struct {
 
 	queue chan string
 	mu    sync.Mutex
+	done  chan struct{}
 }
 
 // NewRunner creates a new Runner.
@@ -42,6 +43,7 @@ func NewRunner(runStore *store.RunStore, stepStore *store.StepStore, chatModel m
 		callback:  callbackURL,
 		logger:    logger,
 		queue:     make(chan string, 100),
+		done:      make(chan struct{}),
 	}
 }
 
@@ -62,6 +64,7 @@ func (r *Runner) Enqueue(runID string) {
 
 // Start runs the serial worker loop. Blocks until context is cancelled.
 func (r *Runner) Start(ctx context.Context) {
+	defer close(r.done)
 	r.logger.Info("agent runner started")
 	for {
 		select {
@@ -72,6 +75,12 @@ func (r *Runner) Start(ctx context.Context) {
 			r.processRun(ctx, runID)
 		}
 	}
+}
+
+// Done returns a channel that is closed when the runner has finished processing
+// and the Start method has returned. Use this for graceful shutdown.
+func (r *Runner) Done() <-chan struct{} {
+	return r.done
 }
 
 // RecoverRuns finds interrupted runs (status=running) and re-enqueues them.

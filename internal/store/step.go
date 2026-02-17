@@ -16,9 +16,7 @@ type StepPhase string
 const (
 	StepPhaseFrame   StepPhase = "frame"
 	StepPhasePlan    StepPhase = "plan"
-	StepPhaseReason  StepPhase = "reason"
 	StepPhaseAct     StepPhase = "act"
-	StepPhaseObserve StepPhase = "observe"
 	StepPhaseReflect StepPhase = "reflect"
 	StepPhaseDone    StepPhase = "done"
 )

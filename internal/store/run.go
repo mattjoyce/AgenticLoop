@@ -141,16 +141,6 @@ func (s *RunStore) UpdateStatus(ctx context.Context, id string, status RunStatus
 	return nil
 }
 
-// NextQueued returns the oldest queued run, or nil if none.
-func (s *RunStore) NextQueued(ctx context.Context) (*Run, error) {
-	run, err := s.scanOne(ctx,
-		`SELECT id, wake_id, goal, context, constraints, status, summary, error, started_at, completed_at, updated_at, created_at
-		 FROM runs WHERE status = ? ORDER BY created_at ASC LIMIT 1`, string(RunStatusQueued))
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return run, err
-}
 
 func (s *RunStore) scanOne(ctx context.Context, query string, args ...any) (*Run, error) {
 	row := s.db.QueryRowContext(ctx, query, args...)

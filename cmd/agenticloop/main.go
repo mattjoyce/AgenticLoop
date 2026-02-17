@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/mattjoyce/agenticloop/internal/agent"
 	"github.com/mattjoyce/agenticloop/internal/api"
@@ -135,6 +136,12 @@ func runStart(args []string) error {
 	case sig := <-sigCh:
 		logger.Info("received signal, shutting down", "signal", sig)
 		cancel()
+		select {
+		case <-runner.Done():
+			logger.Info("runner stopped gracefully")
+		case <-time.After(10 * time.Second):
+			logger.Warn("runner did not stop within 10s, exiting anyway")
+		}
 		return nil
 	case err := <-errCh:
 		if err != nil && err != context.Canceled {

@@ -86,8 +86,13 @@ func (c *Client) Trigger(ctx context.Context, plugin, command string, payload js
 }
 
 // PollJob polls GET /job/{jobID} until the job completes or the context is cancelled.
+// Uses exponential backoff starting at pollInterval, capped at 30s, with a maximum of 60 attempts.
 func (c *Client) PollJob(ctx context.Context, jobID string, pollInterval time.Duration) (*JobStatusResponse, error) {
-	for {
+	const maxAttempts = 60
+	const maxBackoff = 30 * time.Second
+	interval := pollInterval
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		status, err := c.GetJob(ctx, jobID)
 		if err != nil {
 			return nil, err
@@ -101,9 +106,16 @@ func (c *Client) PollJob(ctx context.Context, jobID string, pollInterval time.Du
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(pollInterval):
+		case <-time.After(interval):
+		}
+
+		interval = interval * 2
+		if interval > maxBackoff {
+			interval = maxBackoff
 		}
 	}
+
+	return nil, fmt.Errorf("poll job %s: max attempts (%d) exhausted", jobID, maxAttempts)
 }
 
 // Callback sends a completion notification to a Ductile webhook endpoint.

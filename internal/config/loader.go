@@ -59,6 +59,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Agent.MaxRetryPerStep == 0 {
 		cfg.Agent.MaxRetryPerStep = 3
 	}
+	if cfg.Agent.MaxActRounds == 0 {
+		cfg.Agent.MaxActRounds = 6
+	}
 	if cfg.Agent.WorkspaceDir == "" {
 		cfg.Agent.WorkspaceDir = "./data/workspaces"
 	}
@@ -179,8 +182,20 @@ func validate(cfg *Config) error {
 	if cfg.Ductile.BaseURL == "" {
 		return fmt.Errorf("ductile.base_url is required")
 	}
+	if cfg.Ductile.Token != "" && envVarPattern.MatchString(cfg.Ductile.Token) {
+		matches := envVarPattern.FindStringSubmatch(cfg.Ductile.Token)
+		if len(matches) > 1 {
+			return fmt.Errorf("ductile.token: environment variable ${%s} is not set", matches[1])
+		}
+	}
 	if cfg.Agent.DefaultMaxLoops <= 0 {
 		return fmt.Errorf("agent.default_max_loops must be positive")
+	}
+	if cfg.Agent.DefaultDeadline <= 0 {
+		return fmt.Errorf("agent.default_deadline must be positive")
+	}
+	if cfg.Agent.StepTimeout <= 0 {
+		return fmt.Errorf("agent.step_timeout must be positive")
 	}
 	return nil
 }

@@ -61,22 +61,24 @@ func (t *DuctileTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 		return "", fmt.Errorf("poll job %s: %w", jobID, err)
 	}
 
+	var out string
 	if result.Status != "succeeded" {
-		return fmt.Sprintf(`{"status":"%s","job_id":"%s","error":"job did not succeed"}`, result.Status, jobID), nil
+		out = fmt.Sprintf(`{"status":"%s","job_id":"%s","error":"job did not succeed"}`, result.Status, jobID)
+	} else {
+		outBytes, _ := json.Marshal(map[string]any{
+			"status": result.Status,
+			"job_id": jobID,
+			"result": result.Result,
+		})
+		out = string(outBytes)
 	}
-
-	out, _ := json.Marshal(map[string]any{
-		"status": result.Status,
-		"job_id": jobID,
-		"result": result.Result,
-	})
 
 	if t.observer != nil {
 		toolName := fmt.Sprintf("%s/%s", t.plugin, t.command)
-		t.observer(toolName, argumentsInJSON, string(out), result.Status)
+		t.observer(toolName, argumentsInJSON, out, result.Status)
 	}
 
-	return string(out), nil
+	return out, nil
 }
 
 // WithObserver returns a copy of the tool with the given observer attached.

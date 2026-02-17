@@ -113,6 +113,11 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 	}
 
 	for iter := 1; iter <= maxLoops; iter++ {
+		select {
+		case <-ctx.Done():
+			return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("context cancelled: %w", ctx.Err()))
+		default:
+		}
 		state.Iteration = iter
 		if ws != nil {
 			state.Memory = clipText(ws.ReadRunMemory(), 12000)
@@ -211,12 +216,15 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 			if summary == "" {
 				summary = strings.TrimSpace(state.Act)
 			}
-			if err := l.runStore.UpdateStatus(ctx, run.ID, store.RunStatusDone, &summary, nil); err != nil {
+			doneCtx, doneCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := l.runStore.UpdateStatus(doneCtx, run.ID, store.RunStatusDone, &summary, nil); err != nil {
+				doneCancel()
 				return fmt.Errorf("mark run done: %w", err)
 			}
-			if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseDone, summary); err != nil {
+			if err := l.appendTextStep(doneCtx, run.ID, &stepNum, store.StepPhaseDone, summary); err != nil {
 				l.logger.Error("failed to persist done step", "run_id", run.ID, "error", err)
 			}
+			doneCancel()
 			l.emitCallback(ctx, callbackURL, run.ID, "done", &summary, nil)
 			l.logger.Info("agent loop completed", "run_id", run.ID, "iteration", iter)
 			return nil
@@ -285,10 +293,36 @@ func (l *Loop) buildToolset(ctx context.Context, tools []tool.BaseTool) (*prepar
 }
 
 func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (string, error) {
-	resp, err := l.chatModel.Generate(ctx, []*schema.Message{
+	if l.cfg.StepTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, l.cfg.StepTimeout)
+		defer cancel()
+	}
+	msgs := []*schema.Message{
 		schema.SystemMessage(prompt),
 		schema.UserMessage(userDirective),
-	})
+	}
+	var resp *schema.Message
+	var err error
+	maxRetries := l.cfg.MaxRetryPerStep
+	if maxRetries <= 0 {
+		maxRetries = 1
+	}
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		resp, err = l.chatModel.Generate(ctx, msgs)
+		if err == nil {
+			break
+		}
+		if attempt < maxRetries-1 {
+			backoff := time.Duration(1<<uint(attempt)) * time.Second
+			l.logger.Warn("text stage LLM error, retrying", "attempt", attempt+1, "backoff", backoff, "error", err)
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -302,6 +336,11 @@ type actStageResult struct {
 }
 
 func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt string) (actStageResult, error) {
+	if l.cfg.StepTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, l.cfg.StepTimeout)
+		defer cancel()
+	}
 	messages := []*schema.Message{
 		schema.SystemMessage(prompt),
 		schema.UserMessage("Execute the action now. Use tools when needed, then summarize what you accomplished."),
@@ -309,13 +348,36 @@ func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt
 
 	result := actStageResult{}
 	var transcript strings.Builder
-	const maxRounds = 6
+	maxRounds := l.cfg.MaxActRounds
+	if maxRounds <= 0 {
+		maxRounds = 6
+	}
 	toolSeq := 0
 
 	for round := 1; round <= maxRounds; round++ {
-		resp, err := toolset.model.Generate(ctx, messages)
-		if err != nil {
-			return result, err
+		var resp *schema.Message
+		var genErr error
+		maxRetries := l.cfg.MaxRetryPerStep
+		if maxRetries <= 0 {
+			maxRetries = 1
+		}
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			resp, genErr = toolset.model.Generate(ctx, messages)
+			if genErr == nil {
+				break
+			}
+			if attempt < maxRetries-1 {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				l.logger.Warn("act stage LLM error, retrying", "round", round, "attempt", attempt+1, "backoff", backoff, "error", genErr)
+				select {
+				case <-ctx.Done():
+					return result, ctx.Err()
+				case <-time.After(backoff):
+				}
+			}
+		}
+		if genErr != nil {
+			return result, genErr
 		}
 		messages = append(messages, resp)
 
@@ -392,17 +454,22 @@ func (l *Loop) renderPrompt(tmpl string, data stageState) string {
 	return b.String()
 }
 
-func (l *Loop) failRun(ctx context.Context, callbackURL, runID string, err error) error {
+func (l *Loop) failRun(_ context.Context, callbackURL, runID string, err error) error {
+	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	errMsg := err.Error()
-	_ = l.runStore.UpdateStatus(ctx, runID, store.RunStatusFailed, nil, &errMsg)
-	l.emitCallback(ctx, callbackURL, runID, "failed", nil, &errMsg)
+	_ = l.runStore.UpdateStatus(bgCtx, runID, store.RunStatusFailed, nil, &errMsg)
+	l.emitCallback(bgCtx, callbackURL, runID, "failed", nil, &errMsg)
 	return err
 }
 
-func (l *Loop) emitCallback(ctx context.Context, callbackURL, runID, status string, summary *string, errMsg *string) {
+func (l *Loop) emitCallback(_ context.Context, callbackURL, runID, status string, summary *string, errMsg *string) {
 	if callbackURL == "" || l.client == nil {
 		return
 	}
+
+	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	payload := map[string]any{
 		"run_id": runID,
@@ -415,7 +482,7 @@ func (l *Loop) emitCallback(ctx context.Context, callbackURL, runID, status stri
 		payload["error"] = *errMsg
 	}
 
-	if err := l.client.Callback(ctx, callbackURL, payload); err != nil {
+	if err := l.client.Callback(bgCtx, callbackURL, payload); err != nil {
 		l.logger.Error("failed to emit callback", "run_id", runID, "url", callbackURL, "error", err)
 	} else {
 		l.logger.Info("callback emitted", "run_id", runID, "url", callbackURL, "status", status)

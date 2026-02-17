@@ -51,6 +51,7 @@ type AgentConfig struct {
 	DefaultDeadline time.Duration `yaml:"default_deadline"`
 	StepTimeout     time.Duration `yaml:"step_timeout"`
 	MaxRetryPerStep int           `yaml:"max_retry_per_step"`
+	MaxActRounds    int           `yaml:"max_act_rounds"`
 	WorkspaceDir    string        `yaml:"workspace_dir"`
 	Prompts         AgentPrompts  `yaml:"prompts"`
 }
