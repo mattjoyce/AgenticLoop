@@ -13,6 +13,7 @@ import (
 	"github.com/mattjoyce/agenticloop/internal/api"
 	"github.com/mattjoyce/agenticloop/internal/config"
 	"github.com/mattjoyce/agenticloop/internal/ductile"
+	"github.com/mattjoyce/agenticloop/internal/localtools"
 	"github.com/mattjoyce/agenticloop/internal/provider"
 	"github.com/mattjoyce/agenticloop/internal/storage"
 	"github.com/mattjoyce/agenticloop/internal/store"
@@ -101,10 +102,11 @@ func runStart(args []string) error {
 	}
 
 	// Create tools from allowlist
-	tools := ductile.BuildTools(dc, cfg.Ductile.Allowlist)
+	tools := ductile.BuildTools(dc, cfg.Ductile.Allowlist, nil)
+	tools = append(tools, localtools.BuildDefaultTools()...)
 
 	// Create agent runner
-	runner := agent.NewRunner(runStore, stepStore, chatModel, tools, cfg.Agent, logger)
+	runner := agent.NewRunner(runStore, stepStore, chatModel, tools, cfg.Agent, dc, cfg.Ductile.CallbackURL, logger)
 
 	// Recover interrupted runs
 	if err := runner.RecoverRuns(ctx); err != nil {

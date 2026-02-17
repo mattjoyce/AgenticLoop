@@ -7,6 +7,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 
 	"github.com/cloudwego/eino-ext/components/model/claude"
+	"github.com/cloudwego/eino-ext/components/model/ollama"
 	"github.com/cloudwego/eino-ext/components/model/openai"
 
 	"github.com/mattjoyce/agenticloop/internal/config"
@@ -19,8 +20,10 @@ func NewChatModel(ctx context.Context, cfg config.LLMConfig) (model.ToolCallingC
 		return newAnthropicModel(ctx, cfg)
 	case "openai":
 		return newOpenAIModel(ctx, cfg)
+	case "ollama":
+		return newOllamaModel(ctx, cfg)
 	default:
-		return nil, fmt.Errorf("unsupported llm provider: %q (supported: anthropic, openai)", cfg.Provider)
+		return nil, fmt.Errorf("unsupported llm provider: %q (supported: anthropic, openai, ollama)", cfg.Provider)
 	}
 }
 
@@ -53,6 +56,24 @@ func newOpenAIModel(ctx context.Context, cfg config.LLMConfig) (model.ToolCallin
 	m, err := openai.NewChatModel(ctx, openAICfg)
 	if err != nil {
 		return nil, fmt.Errorf("create openai model: %w", err)
+	}
+	return m, nil
+}
+
+func newOllamaModel(ctx context.Context, cfg config.LLMConfig) (model.ToolCallingChatModel, error) {
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+
+	ollamaCfg := &ollama.ChatModelConfig{
+		BaseURL: baseURL,
+		Model:   cfg.Model,
+	}
+
+	m, err := ollama.NewChatModel(ctx, ollamaCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create ollama model: %w", err)
 	}
 	return m, nil
 }

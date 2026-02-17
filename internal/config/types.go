@@ -31,9 +31,10 @@ type APIConfig struct {
 
 // DuctileConfig defines the connection to the Ductile gateway.
 type DuctileConfig struct {
-	BaseURL   string   `yaml:"base_url"`
-	Token     string   `yaml:"token"`
-	Allowlist []string `yaml:"allowlist"`
+	BaseURL     string   `yaml:"base_url"`
+	Token       string   `yaml:"token"`
+	Allowlist   []string `yaml:"allowlist"`
+	CallbackURL string   `yaml:"callback_url,omitempty"`
 }
 
 // LLMConfig defines the LLM provider settings.
@@ -46,8 +47,18 @@ type LLMConfig struct {
 
 // AgentConfig defines default agent behavior.
 type AgentConfig struct {
-	DefaultMaxLoops  int           `yaml:"default_max_loops"`
-	DefaultDeadline  time.Duration `yaml:"default_deadline"`
-	StepTimeout      time.Duration `yaml:"step_timeout"`
-	MaxRetryPerStep  int           `yaml:"max_retry_per_step"`
+	DefaultMaxLoops int           `yaml:"default_max_loops"`
+	DefaultDeadline time.Duration `yaml:"default_deadline"`
+	StepTimeout     time.Duration `yaml:"step_timeout"`
+	MaxRetryPerStep int           `yaml:"max_retry_per_step"`
+	WorkspaceDir    string        `yaml:"workspace_dir"`
+	Prompts         AgentPrompts  `yaml:"prompts"`
+}
+
+// AgentPrompts defines stage-specific prompt templates.
+type AgentPrompts struct {
+	Frame   string `yaml:"frame"`
+	Plan    string `yaml:"plan"`
+	Act     string `yaml:"act"`
+	Reflect string `yaml:"reflect"`
 }

@@ -169,12 +169,36 @@ type scanner interface {
 func scanRun(s scanner) (*Run, error) {
 	var r Run
 	var status string
+	var wakeID sql.NullString
+	var contextJSON sql.NullString
+	var constraintsJSON sql.NullString
+	var summary sql.NullString
+	var errMsg sql.NullString
 	var startedAt, completedAt, updatedAt, createdAt *string
 
-	err := s.Scan(&r.ID, &r.WakeID, &r.Goal, &r.Context, &r.Constraints,
-		&status, &r.Summary, &r.Error, &startedAt, &completedAt, &updatedAt, &createdAt)
+	err := s.Scan(&r.ID, &wakeID, &r.Goal, &contextJSON, &constraintsJSON,
+		&status, &summary, &errMsg, &startedAt, &completedAt, &updatedAt, &createdAt)
 	if err != nil {
 		return nil, fmt.Errorf("scan run: %w", err)
+	}
+
+	if wakeID.Valid {
+		v := wakeID.String
+		r.WakeID = &v
+	}
+	if contextJSON.Valid && contextJSON.String != "" {
+		r.Context = json.RawMessage(contextJSON.String)
+	}
+	if constraintsJSON.Valid && constraintsJSON.String != "" {
+		r.Constraints = json.RawMessage(constraintsJSON.String)
+	}
+	if summary.Valid {
+		v := summary.String
+		r.Summary = &v
+	}
+	if errMsg.Valid {
+		v := errMsg.String
+		r.Error = &v
 	}
 
 	r.Status = RunStatus(status)

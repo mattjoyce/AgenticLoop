@@ -11,6 +11,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 
 	"github.com/mattjoyce/agenticloop/internal/config"
+	"github.com/mattjoyce/agenticloop/internal/ductile"
 	"github.com/mattjoyce/agenticloop/internal/store"
 )
 
@@ -21,6 +22,8 @@ type Runner struct {
 	chatModel model.ToolCallingChatModel
 	tools     []tool.BaseTool
 	cfg       config.AgentConfig
+	client    *ductile.Client
+	callback  string
 	logger    *slog.Logger
 
 	queue chan string
@@ -28,13 +31,15 @@ type Runner struct {
 }
 
 // NewRunner creates a new Runner.
-func NewRunner(runStore *store.RunStore, stepStore *store.StepStore, chatModel model.ToolCallingChatModel, tools []tool.BaseTool, cfg config.AgentConfig, logger *slog.Logger) *Runner {
+func NewRunner(runStore *store.RunStore, stepStore *store.StepStore, chatModel model.ToolCallingChatModel, tools []tool.BaseTool, cfg config.AgentConfig, client *ductile.Client, callbackURL string, logger *slog.Logger) *Runner {
 	return &Runner{
 		runStore:  runStore,
 		stepStore: stepStore,
 		chatModel: chatModel,
 		tools:     tools,
 		cfg:       cfg,
+		client:    client,
+		callback:  callbackURL,
 		logger:    logger,
 		queue:     make(chan string, 100),
 	}
@@ -102,10 +107,10 @@ func (r *Runner) processRun(ctx context.Context, runID string) {
 		return
 	}
 
-	loop := NewLoop(r.chatModel, r.tools, r.cfg, r.runStore, r.stepStore, r.logger)
+	loop := NewLoop(r.chatModel, r.tools, r.cfg, r.runStore, r.stepStore, r.client, r.logger)
 
 	start := time.Now()
-	if err := loop.Execute(ctx, run); err != nil {
+	if err := loop.Execute(ctx, run, r.callback); err != nil {
 		r.logger.Error("run failed", "run_id", runID, "error", err, "duration", time.Since(start))
 	} else {
 		r.logger.Info("run completed", "run_id", runID, "duration", time.Since(start))

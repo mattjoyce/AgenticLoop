@@ -11,11 +11,15 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// ToolCallObserver is called after each tool invocation with the tool name, input, output, and status.
+type ToolCallObserver func(tool, input, output, status string)
+
 // DuctileTool wraps a Ductile plugin/command as an Eino InvokableTool.
 type DuctileTool struct {
-	client  *Client
-	plugin  string
-	command string
+	client   *Client
+	plugin   string
+	command  string
+	observer ToolCallObserver
 }
 
 var _ tool.InvokableTool = (*DuctileTool)(nil)
@@ -66,12 +70,29 @@ func (t *DuctileTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 		"job_id": jobID,
 		"result": result.Result,
 	})
+
+	if t.observer != nil {
+		toolName := fmt.Sprintf("%s/%s", t.plugin, t.command)
+		t.observer(toolName, argumentsInJSON, string(out), result.Status)
+	}
+
 	return string(out), nil
+}
+
+// WithObserver returns a copy of the tool with the given observer attached.
+func (t *DuctileTool) WithObserver(obs ToolCallObserver) *DuctileTool {
+	return &DuctileTool{
+		client:   t.client,
+		plugin:   t.plugin,
+		command:  t.command,
+		observer: obs,
+	}
 }
 
 // BuildTools creates Eino tools from the Ductile allowlist.
 // Each entry is "plugin/command" (e.g. "echo/poll").
-func BuildTools(client *Client, allowlist []string) []tool.BaseTool {
+// If observer is non-nil, it is called after each tool invocation.
+func BuildTools(client *Client, allowlist []string, observer ToolCallObserver) []tool.BaseTool {
 	var tools []tool.BaseTool
 	for _, entry := range allowlist {
 		parts := strings.SplitN(entry, "/", 2)
@@ -79,9 +100,10 @@ func BuildTools(client *Client, allowlist []string) []tool.BaseTool {
 			continue
 		}
 		tools = append(tools, &DuctileTool{
-			client:  client,
-			plugin:  parts[0],
-			command: parts[1],
+			client:   client,
+			plugin:   parts[0],
+			command:  parts[1],
+			observer: observer,
 		})
 	}
 	return tools

@@ -106,6 +106,34 @@ func (c *Client) PollJob(ctx context.Context, jobID string, pollInterval time.Du
 	}
 }
 
+// Callback sends a completion notification to a Ductile webhook endpoint.
+func (c *Client) Callback(ctx context.Context, callbackURL string, payload map[string]any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal callback payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, callbackURL, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("create callback request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("callback: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("callback: status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
 // GetJob retrieves the status of a job.
 func (c *Client) GetJob(ctx context.Context, jobID string) (*JobStatusResponse, error) {
 	url := fmt.Sprintf("%s/job/%s", c.baseURL, jobID)

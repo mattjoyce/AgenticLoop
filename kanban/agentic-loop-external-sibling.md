@@ -1,6 +1,6 @@
 ---
 id: 105
-status: todo
+status: doing
 priority: High
 blocked_by: []
 tags: [architecture, agent, external-service, protocol, api, scheduler]
@@ -260,9 +260,9 @@ Phase 4: Operator UX
 ## Acceptance Criteria
 
 - [ ] Ductile scheduled wake job succeeds on `accepted=true` only.
-- [ ] Sibling returns deterministic `run_id` for duplicate `wake_id`.
+- [x] Sibling returns deterministic `run_id` for duplicate `wake_id`.
 - [ ] Sibling can execute at least two Ductile tool calls in one run.
-- [ ] Run status is queryable independently of wake job status.
+- [x] Run status is queryable independently of wake job status.
 - [ ] Token scopes enforce least privilege for sibling tool calls.
 - [ ] Restarting sibling does not lose active run progress.
 - [ ] Clear docs distinguish wake acceptance from run completion.
@@ -271,3 +271,4 @@ Phase 4: Operator UX
 ## Narrative
 
 - 2026-02-16: Created card #105 to replace internal AgenticLoop plugin direction with an external Ductile-aware sibling service. Captured decisions, API contract, reliability/security requirements, and phased implementation guidance. (by Codex)
+- 2026-02-17: Implemented a staged `frame -> plan -> act -> reflect` loop with durable per-stage step persistence, workspace prompt/memory artifacts, and XML-bounded prompt templates moved to config; validated multi-iteration behavior and end-to-end runs on Ollama (`gpt-oss:latest`). Added local diagnostic tools (`sys_internal_ip`, `sys_external_ip`) for concrete tool-driven loop tests. Card remains in progress because wake acceptance contract alignment and Ductile-specific tool hardening are still outstanding. (by Codex)

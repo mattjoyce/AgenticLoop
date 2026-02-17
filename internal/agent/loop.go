@@ -5,54 +5,59 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
+	"text/template"
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/mattjoyce/agenticloop/internal/config"
+	"github.com/mattjoyce/agenticloop/internal/ductile"
+	"github.com/mattjoyce/agenticloop/internal/localtools"
 	"github.com/mattjoyce/agenticloop/internal/store"
 )
 
-// Loop builds and executes an Eino ReAct agent for a single run.
+// Loop builds and executes an explicit staged agent loop for a single run.
 type Loop struct {
 	chatModel model.ToolCallingChatModel
 	tools     []tool.BaseTool
 	cfg       config.AgentConfig
 	runStore  *store.RunStore
 	stepStore *store.StepStore
+	client    *ductile.Client
 	logger    *slog.Logger
 }
 
 // NewLoop creates a new Loop.
-func NewLoop(chatModel model.ToolCallingChatModel, tools []tool.BaseTool, cfg config.AgentConfig, runStore *store.RunStore, stepStore *store.StepStore, logger *slog.Logger) *Loop {
+func NewLoop(chatModel model.ToolCallingChatModel, tools []tool.BaseTool, cfg config.AgentConfig, runStore *store.RunStore, stepStore *store.StepStore, client *ductile.Client, logger *slog.Logger) *Loop {
 	return &Loop{
 		chatModel: chatModel,
 		tools:     tools,
 		cfg:       cfg,
 		runStore:  runStore,
 		stepStore: stepStore,
+		client:    client,
 		logger:    logger,
 	}
 }
 
-// Execute runs the agent loop for a given run. It persists steps and updates run status.
-func (l *Loop) Execute(ctx context.Context, run *store.Run) error {
+// Execute runs the staged loop for a given run. It persists steps and updates run status.
+func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) error {
 	l.logger.Info("starting agent loop", "run_id", run.ID, "goal", run.Goal)
 
-	// Mark running
 	if err := l.runStore.UpdateStatus(ctx, run.ID, store.RunStatusRunning, nil, nil); err != nil {
 		return fmt.Errorf("mark run running: %w", err)
 	}
 
-	// Determine max loops and deadline
+	ws, err := NewWorkspace(l.cfg.WorkspaceDir, run.ID)
+	if err != nil {
+		l.logger.Error("failed to create workspace", "run_id", run.ID, "error", err)
+	}
+
 	maxLoops := l.cfg.DefaultMaxLoops
 	deadline := l.cfg.DefaultDeadline
-
-	// Apply constraints if present
 	if len(run.Constraints) > 0 {
 		var constraints struct {
 			MaxLoops int    `json:"max_loops"`
@@ -70,115 +75,370 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run) error {
 		}
 	}
 
-	// Apply deadline
 	ctx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
-
-	// Build system prompt
-	systemPrompt := fmt.Sprintf("You are an agent executing a task. Your goal is:\n\n%s", run.Goal)
-	if len(run.Context) > 0 {
-		systemPrompt += fmt.Sprintf("\n\nAdditional context:\n%s", string(run.Context))
-	}
-
-	// Build ReAct agent
-	agent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: l.chatModel,
-		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: l.tools,
-		},
-		MessageModifier: func(ctx context.Context, input []*schema.Message) []*schema.Message {
-			res := make([]*schema.Message, 0, len(input)+1)
-			res = append(res, schema.SystemMessage(systemPrompt))
-			res = append(res, input...)
-			return res
-		},
-		MaxStep: maxLoops,
-	})
-	if err != nil {
-		errMsg := fmt.Sprintf("build agent: %s", err)
-		_ = l.runStore.UpdateStatus(ctx, run.ID, store.RunStatusFailed, nil, &errMsg)
-		return fmt.Errorf("build agent: %w", err)
-	}
-
-	// Load existing steps for crash resume
-	existingSteps, err := l.stepStore.GetByRunID(ctx, run.ID)
-	if err != nil {
-		return fmt.Errorf("load existing steps: %w", err)
-	}
 
 	stepNum, err := l.stepStore.MaxStepNum(ctx, run.ID)
 	if err != nil {
 		return fmt.Errorf("get max step num: %w", err)
 	}
 
-	// Build conversation from existing steps (crash resume)
-	messages := buildConversation(existingSteps)
-	if len(messages) == 0 {
-		messages = []*schema.Message{
-			schema.UserMessage(run.Goal),
+	state := stageState{
+		Goal:        run.Goal,
+		Context:     jsonOrNull(run.Context),
+		Constraints: jsonOrNull(run.Constraints),
+		MaxLoops:    maxLoops,
+	}
+
+	if ws != nil {
+		if memory := ws.ReadMemory(); memory != "" {
+			state.Memory = clipText(memory, 12000)
+		}
+		if err := ws.WritePromptSnapshot(run.Goal, run.Context, run.Constraints, "staged-prompts: frame, plan, act, reflect"); err != nil {
+			l.logger.Error("failed to write prompt snapshot", "run_id", run.ID, "error", err)
 		}
 	}
 
-	// Record the reasoning step
-	stepNum++
-	_, err = l.stepStore.Append(ctx, run.ID, stepNum, store.StepPhaseReason, nil, nil)
-	if err != nil {
-		l.logger.Error("failed to record reason step", "run_id", run.ID, "error", err)
+	activeTools := l.tools
+	if ws != nil {
+		activeTools = l.rebuildToolsWithObserver(ws)
 	}
 
-	// Execute the agent (non-streaming, safe with Claude)
-	result, err := agent.Generate(ctx, messages)
+	toolset, err := l.buildToolset(ctx, activeTools)
 	if err != nil {
 		errMsg := err.Error()
 		_ = l.runStore.UpdateStatus(ctx, run.ID, store.RunStatusFailed, nil, &errMsg)
-		return fmt.Errorf("agent generate: %w", err)
+		l.emitCallback(ctx, callbackURL, run.ID, "failed", nil, &errMsg)
+		return err
 	}
 
-	// Extract summary from final message
-	summary := result.Content
-	if err := l.runStore.UpdateStatus(ctx, run.ID, store.RunStatusDone, &summary, nil); err != nil {
-		return fmt.Errorf("mark run done: %w", err)
+	for iter := 1; iter <= maxLoops; iter++ {
+		state.Iteration = iter
+		if ws != nil {
+			state.Memory = clipText(ws.ReadMemory(), 12000)
+		}
+
+		framePrompt := l.renderPrompt(l.cfg.Prompts.Frame, state)
+		if ws != nil {
+			_ = ws.AppendStagePrompt(iter, "frame", framePrompt)
+		}
+		frameOut, err := l.runTextStage(ctx, framePrompt, "Produce the frame now.")
+		if err != nil {
+			return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("frame stage: %w", err))
+		}
+		state.Frame = frameOut
+		if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseFrame, frameOut); err != nil {
+			l.logger.Error("failed to persist frame step", "run_id", run.ID, "error", err)
+		}
+
+		planPrompt := l.renderPrompt(l.cfg.Prompts.Plan, state)
+		if ws != nil {
+			_ = ws.AppendStagePrompt(iter, "plan", planPrompt)
+		}
+		planOut, err := l.runTextStage(ctx, planPrompt, "Produce the plan now.")
+		if err != nil {
+			return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("plan stage: %w", err))
+		}
+		state.Plan = planOut
+		if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhasePlan, planOut); err != nil {
+			l.logger.Error("failed to persist plan step", "run_id", run.ID, "error", err)
+		}
+
+		actPrompt := l.renderPrompt(l.cfg.Prompts.Act, state)
+		if ws != nil {
+			_ = ws.AppendStagePrompt(iter, "act", actPrompt)
+		}
+		actOut, err := l.runActStage(ctx, toolset, actPrompt)
+		if err != nil {
+			return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("act stage: %w", err))
+		}
+		state.Act = actOut
+		if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseAct, actOut); err != nil {
+			l.logger.Error("failed to persist act summary step", "run_id", run.ID, "error", err)
+		}
+
+		reflectPrompt := l.renderPrompt(l.cfg.Prompts.Reflect, state)
+		if ws != nil {
+			_ = ws.AppendStagePrompt(iter, "reflect", reflectPrompt)
+		}
+		reflectOut, err := l.runTextStage(ctx, reflectPrompt, "Return reflection JSON now.")
+		if err != nil {
+			return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("reflect stage: %w", err))
+		}
+		if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseReflect, reflectOut); err != nil {
+			l.logger.Error("failed to persist reflect step", "run_id", run.ID, "error", err)
+		}
+
+		decision := parseReflectDecision(reflectOut)
+		if decision.Done {
+			summary := strings.TrimSpace(decision.Summary)
+			if summary == "" {
+				summary = strings.TrimSpace(state.Act)
+			}
+			if err := l.runStore.UpdateStatus(ctx, run.ID, store.RunStatusDone, &summary, nil); err != nil {
+				return fmt.Errorf("mark run done: %w", err)
+			}
+			if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseDone, summary); err != nil {
+				l.logger.Error("failed to persist done step", "run_id", run.ID, "error", err)
+			}
+			l.emitCallback(ctx, callbackURL, run.ID, "done", &summary, nil)
+			l.logger.Info("agent loop completed", "run_id", run.ID, "iteration", iter)
+			return nil
+		}
+
+		state.NextFocus = decision.NextFocus
 	}
 
-	// Record completion step
-	stepNum++
-	completionJSON, _ := json.Marshal(map[string]string{"content": result.Content})
-	doneStep, err := l.stepStore.Append(ctx, run.ID, stepNum, store.StepPhaseDone, nil, nil)
-	if err == nil {
-		_ = l.stepStore.UpdateStatus(ctx, doneStep.ID, store.StepStatusOK, completionJSON, nil)
-	}
-
-	l.logger.Info("agent loop completed", "run_id", run.ID, "steps", stepNum)
-	return nil
+	return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("max loops exhausted without completion"))
 }
 
-// buildConversation reconstructs the message history from persisted steps.
-func buildConversation(steps []*store.Step) []*schema.Message {
-	if len(steps) == 0 {
-		return nil
+type stageState struct {
+	Goal        string
+	Context     string
+	Constraints string
+	Memory      string
+	Frame       string
+	Plan        string
+	Act         string
+	NextFocus   string
+	Iteration   int
+	MaxLoops    int
+}
+
+type reflectDecision struct {
+	Done      bool   `json:"done"`
+	Summary   string `json:"summary"`
+	NextFocus string `json:"next_focus"`
+}
+
+type preparedToolset struct {
+	model  model.ToolCallingChatModel
+	byName map[string]tool.InvokableTool
+}
+
+func (l *Loop) buildToolset(ctx context.Context, tools []tool.BaseTool) (*preparedToolset, error) {
+	infos := make([]*schema.ToolInfo, 0, len(tools))
+	byName := make(map[string]tool.InvokableTool, len(tools))
+
+	for _, base := range tools {
+		inv, ok := base.(tool.InvokableTool)
+		if !ok {
+			continue
+		}
+		info, err := inv.Info(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("tool info: %w", err)
+		}
+		infos = append(infos, info)
+		byName[info.Name] = inv
 	}
 
-	var messages []*schema.Message
-	for _, step := range steps {
-		switch step.Phase {
-		case store.StepPhaseAct:
-			if step.Tool != nil && step.ToolInput != nil {
-				// Represent as assistant message with tool call
-				messages = append(messages, schema.AssistantMessage("", []schema.ToolCall{
-					{
-						ID: step.ID,
-						Function: schema.FunctionCall{
-							Name:      *step.Tool,
-							Arguments: string(step.ToolInput),
-						},
-					},
-				}))
+	toolModel, err := l.chatModel.WithTools(infos)
+	if err != nil {
+		return nil, fmt.Errorf("bind tools: %w", err)
+	}
+
+	return &preparedToolset{model: toolModel, byName: byName}, nil
+}
+
+func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (string, error) {
+	resp, err := l.chatModel.Generate(ctx, []*schema.Message{
+		schema.SystemMessage(prompt),
+		schema.UserMessage(userDirective),
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Content), nil
+}
+
+func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt string) (string, error) {
+	messages := []*schema.Message{
+		schema.SystemMessage(prompt),
+		schema.UserMessage("Execute the action now. Use tools when needed, then summarize what you accomplished."),
+	}
+
+	var transcript strings.Builder
+	const maxRounds = 6
+	toolSeq := 0
+
+	for round := 1; round <= maxRounds; round++ {
+		resp, err := toolset.model.Generate(ctx, messages)
+		if err != nil {
+			return "", err
+		}
+		messages = append(messages, resp)
+
+		if len(resp.ToolCalls) == 0 {
+			content := strings.TrimSpace(resp.Content)
+			if content != "" {
+				if transcript.Len() > 0 {
+					transcript.WriteString("\n\n")
+				}
+				transcript.WriteString(content)
 			}
-		case store.StepPhaseObserve:
-			if step.ToolOutput != nil {
-				messages = append(messages, schema.ToolMessage(string(step.ToolOutput), step.ID))
+			if strings.TrimSpace(transcript.String()) != "" {
+				return strings.TrimSpace(transcript.String()), nil
 			}
+			return "No actionable output produced.", nil
+		}
+
+		for _, tc := range resp.ToolCalls {
+			toolSeq++
+			name := tc.Function.Name
+			arguments := normalizeJSON(tc.Function.Arguments)
+
+			inv, ok := toolset.byName[name]
+			if !ok {
+				errMsg := fmt.Sprintf("unknown tool: %s", name)
+				obsJSON := mustJSON(map[string]string{"error": errMsg})
+				messages = append(messages, schema.ToolMessage(string(obsJSON), toolCallID(tc, name, toolSeq)))
+				transcript.WriteString(fmt.Sprintf("Tool %s error: %s\n", name, errMsg))
+				continue
+			}
+
+			out, runErr := inv.InvokableRun(ctx, string(arguments))
+			obsJSON := normalizeJSON(out)
+			if runErr != nil {
+				e := runErr.Error()
+				obsJSON = mustJSON(map[string]string{"error": e})
+			}
+
+			messages = append(messages, schema.ToolMessage(string(obsJSON), toolCallID(tc, name, toolSeq)))
+			transcript.WriteString(fmt.Sprintf("Tool %s output:\n%s\n", name, string(obsJSON)))
 		}
 	}
-	return messages
+
+	return strings.TrimSpace(transcript.String()), nil
+}
+
+func (l *Loop) appendTextStep(ctx context.Context, runID string, stepNum *int, phase store.StepPhase, content string) error {
+	*stepNum = *stepNum + 1
+	step, err := l.stepStore.Append(ctx, runID, *stepNum, phase, nil, nil)
+	if err != nil {
+		return err
+	}
+	out := mustJSON(map[string]string{"content": content})
+	return l.stepStore.UpdateStatus(ctx, step.ID, store.StepStatusOK, out, nil)
+}
+
+func (l *Loop) renderPrompt(tmpl string, data stageState) string {
+	t, err := template.New("stage_prompt").Parse(tmpl)
+	if err != nil {
+		return tmpl
+	}
+	var b strings.Builder
+	if err := t.Execute(&b, data); err != nil {
+		return tmpl
+	}
+	return b.String()
+}
+
+func (l *Loop) failRun(ctx context.Context, callbackURL, runID string, err error) error {
+	errMsg := err.Error()
+	_ = l.runStore.UpdateStatus(ctx, runID, store.RunStatusFailed, nil, &errMsg)
+	l.emitCallback(ctx, callbackURL, runID, "failed", nil, &errMsg)
+	return err
+}
+
+func (l *Loop) emitCallback(ctx context.Context, callbackURL, runID, status string, summary *string, errMsg *string) {
+	if callbackURL == "" || l.client == nil {
+		return
+	}
+
+	payload := map[string]any{
+		"run_id": runID,
+		"status": status,
+	}
+	if summary != nil {
+		payload["summary"] = *summary
+	}
+	if errMsg != nil {
+		payload["error"] = *errMsg
+	}
+
+	if err := l.client.Callback(ctx, callbackURL, payload); err != nil {
+		l.logger.Error("failed to emit callback", "run_id", runID, "url", callbackURL, "error", err)
+	} else {
+		l.logger.Info("callback emitted", "run_id", runID, "url", callbackURL, "status", status)
+	}
+}
+
+func jsonOrNull(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "null"
+	}
+	return string(raw)
+}
+
+func clipText(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "\n...[truncated]"
+}
+
+func normalizeJSON(s string) json.RawMessage {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return mustJSON(map[string]string{"raw": ""})
+	}
+	if json.Valid([]byte(trimmed)) {
+		return json.RawMessage(trimmed)
+	}
+	return mustJSON(map[string]string{"raw": trimmed})
+}
+
+func mustJSON(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+func toolCallID(tc schema.ToolCall, toolName string, idx int) string {
+	if tc.ID != "" {
+		return tc.ID
+	}
+	return fmt.Sprintf("%s-%d", toolName, idx)
+}
+
+func parseReflectDecision(raw string) reflectDecision {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return reflectDecision{}
+	}
+
+	var d reflectDecision
+	if err := json.Unmarshal([]byte(text), &d); err == nil {
+		return d
+	}
+
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start >= 0 && end > start {
+		if err := json.Unmarshal([]byte(text[start:end+1]), &d); err == nil {
+			return d
+		}
+	}
+
+	return reflectDecision{Done: false, Summary: text}
+}
+
+func (l *Loop) rebuildToolsWithObserver(ws *Workspace) []tool.BaseTool {
+	observer := func(toolName, input, output, status string) {
+		if err := ws.AppendToolCall(toolName, input, output, status); err != nil {
+			l.logger.Error("failed to write workspace memory", "tool", toolName, "error", err)
+		}
+	}
+
+	var wrapped []tool.BaseTool
+	for _, t := range l.tools {
+		if dt, ok := t.(*ductile.DuctileTool); ok {
+			wrapped = append(wrapped, dt.WithObserver(observer))
+		} else if st, ok := t.(*localtools.CommandTool); ok {
+			wrapped = append(wrapped, st.WithObserver(observer))
+		} else {
+			wrapped = append(wrapped, t)
+		}
+	}
+	return wrapped
 }

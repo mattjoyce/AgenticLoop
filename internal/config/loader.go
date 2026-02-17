@@ -59,6 +59,84 @@ func applyDefaults(cfg *Config) {
 	if cfg.Agent.MaxRetryPerStep == 0 {
 		cfg.Agent.MaxRetryPerStep = 3
 	}
+	if cfg.Agent.WorkspaceDir == "" {
+		cfg.Agent.WorkspaceDir = "./data/workspaces"
+	}
+	if cfg.Agent.Prompts.Frame == "" {
+		cfg.Agent.Prompts.Frame = `<stage name="frame">
+<role>You are in the FRAME stage for an autonomous run.</role>
+<run_context version="1">
+<goal source="run.goal">{{.Goal}}</goal>
+<static_context source="run.context">{{.Context}}</static_context>
+<constraints source="run.constraints">{{.Constraints}}</constraints>
+<loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
+<next_focus source="stage.reflect">{{.NextFocus}}</next_focus>
+<memory source="workspace.memory">{{.Memory}}</memory>
+</run_context>
+<output_contract format="markdown">
+Return concise markdown with:
+- objective
+- known facts
+- unknowns to resolve
+- success condition
+</output_contract>
+</stage>`
+	}
+	if cfg.Agent.Prompts.Plan == "" {
+		cfg.Agent.Prompts.Plan = `<stage name="plan">
+<role>You are in the PLAN stage for an autonomous run.</role>
+<run_context version="1">
+<goal source="run.goal">{{.Goal}}</goal>
+<static_context source="run.context">{{.Context}}</static_context>
+<constraints source="run.constraints">{{.Constraints}}</constraints>
+<loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
+<next_focus source="stage.reflect">{{.NextFocus}}</next_focus>
+</run_context>
+<frame_output source="stage.frame">{{.Frame}}</frame_output>
+<output_contract format="markdown">
+Return a short numbered plan for this loop. Prefer one concrete next action.
+</output_contract>
+</stage>`
+	}
+	if cfg.Agent.Prompts.Act == "" {
+		cfg.Agent.Prompts.Act = `<stage name="act">
+<role>You are in the ACT stage for an autonomous run.</role>
+<run_context version="1">
+<goal source="run.goal">{{.Goal}}</goal>
+<static_context source="run.context">{{.Context}}</static_context>
+<constraints source="run.constraints">{{.Constraints}}</constraints>
+<loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
+<memory source="workspace.memory">{{.Memory}}</memory>
+</run_context>
+<frame_output source="stage.frame">{{.Frame}}</frame_output>
+<plan_output source="stage.plan">{{.Plan}}</plan_output>
+<available_tools source="runtime.bound_tools">
+<tool>sys_internal_ip</tool>
+<tool>sys_external_ip</tool>
+<note>Additional tools may be available at runtime (for example ductile_*).</note>
+</available_tools>
+<output_contract format="markdown">
+Execute the best next action. Use tools when needed.
+When complete for this loop, provide a concise action result.
+</output_contract>
+</stage>`
+	}
+	if cfg.Agent.Prompts.Reflect == "" {
+		cfg.Agent.Prompts.Reflect = `<stage name="reflect">
+<role>You are in the REFLECT stage for an autonomous run.</role>
+<run_context version="1">
+<goal source="run.goal">{{.Goal}}</goal>
+<loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
+</run_context>
+<frame_output source="stage.frame">{{.Frame}}</frame_output>
+<plan_output source="stage.plan">{{.Plan}}</plan_output>
+<act_output source="stage.act">{{.Act}}</act_output>
+<output_contract format="json">
+Return JSON only:
+{"done": boolean, "summary": "string", "next_focus": "string"}
+</output_contract>
+</stage>`
+	}
 }
 
 func validate(cfg *Config) error {
@@ -78,13 +156,16 @@ func validate(cfg *Config) error {
 	if cfg.LLM.Provider == "" {
 		return fmt.Errorf("llm.provider is required")
 	}
-	if cfg.LLM.APIKey == "" {
-		return fmt.Errorf("llm.api_key is required")
-	}
-	if envVarPattern.MatchString(cfg.LLM.APIKey) {
-		matches := envVarPattern.FindStringSubmatch(cfg.LLM.APIKey)
-		if len(matches) > 1 {
-			return fmt.Errorf("llm.api_key: environment variable ${%s} is not set", matches[1])
+	// api_key required for anthropic/openai, not for ollama
+	if cfg.LLM.Provider != "ollama" {
+		if cfg.LLM.APIKey == "" {
+			return fmt.Errorf("llm.api_key is required for provider %q", cfg.LLM.Provider)
+		}
+		if envVarPattern.MatchString(cfg.LLM.APIKey) {
+			matches := envVarPattern.FindStringSubmatch(cfg.LLM.APIKey)
+			if len(matches) > 1 {
+				return fmt.Errorf("llm.api_key: environment variable ${%s} is not set", matches[1])
+			}
 		}
 	}
 	if cfg.Ductile.BaseURL == "" {

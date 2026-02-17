@@ -14,9 +14,12 @@ import (
 type StepPhase string
 
 const (
+	StepPhaseFrame   StepPhase = "frame"
+	StepPhasePlan    StepPhase = "plan"
 	StepPhaseReason  StepPhase = "reason"
 	StepPhaseAct     StepPhase = "act"
 	StepPhaseObserve StepPhase = "observe"
+	StepPhaseReflect StepPhase = "reflect"
 	StepPhaseDone    StepPhase = "done"
 )
 
@@ -148,13 +151,32 @@ func (s *StepStore) MaxStepNum(ctx context.Context, runID string) (int, error) {
 func scanStep(s scanner) (*Step, error) {
 	var step Step
 	var phase, status string
+	var tool sql.NullString
+	var toolInputJSON sql.NullString
+	var toolOutputJSON sql.NullString
+	var errMsg sql.NullString
 	var startedAt, completedAt, createdAt *string
 
 	err := s.Scan(&step.ID, &step.RunID, &step.StepNum, &phase,
-		&step.Tool, &step.ToolInput, &step.ToolOutput, &status,
-		&step.Attempt, &step.Error, &startedAt, &completedAt, &createdAt)
+		&tool, &toolInputJSON, &toolOutputJSON, &status,
+		&step.Attempt, &errMsg, &startedAt, &completedAt, &createdAt)
 	if err != nil {
 		return nil, fmt.Errorf("scan step: %w", err)
+	}
+
+	if tool.Valid {
+		v := tool.String
+		step.Tool = &v
+	}
+	if toolInputJSON.Valid && toolInputJSON.String != "" {
+		step.ToolInput = json.RawMessage(toolInputJSON.String)
+	}
+	if toolOutputJSON.Valid && toolOutputJSON.String != "" {
+		step.ToolOutput = json.RawMessage(toolOutputJSON.String)
+	}
+	if errMsg.Valid {
+		v := errMsg.String
+		step.Error = &v
 	}
 
 	step.Phase = StepPhase(phase)

@@ -17,12 +17,85 @@ ductile:
     - "jina-reader/fetch"
 
 llm:
-  provider: anthropic
-  model: claude-sonnet-4-20250514
-  api_key: "${ANTHROPIC_API_KEY}"
+  provider: ollama
+  model: gpt-oss:latest
+  base_url: "http://192.168.20.8:11434"
 
 agent:
   default_max_loops: 10
   default_deadline: 5m
   step_timeout: 60s
   max_retry_per_step: 3
+  workspace_dir: "./data/workspaces"
+  prompts:
+    frame: |
+      <stage name="frame">
+      <role>You are in the FRAME stage for an autonomous run.</role>
+      <run_context version="1">
+      <goal source="run.goal">{{.Goal}}</goal>
+      <static_context source="run.context">{{.Context}}</static_context>
+      <constraints source="run.constraints">{{.Constraints}}</constraints>
+      <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
+      <next_focus source="stage.reflect">{{.NextFocus}}</next_focus>
+      <memory source="workspace.memory">{{.Memory}}</memory>
+      </run_context>
+      <output_contract format="markdown">
+      Return concise markdown with:
+      - objective
+      - known facts
+      - unknowns to resolve
+      - success condition
+      </output_contract>
+      </stage>
+    plan: |
+      <stage name="plan">
+      <role>You are in the PLAN stage for an autonomous run.</role>
+      <run_context version="1">
+      <goal source="run.goal">{{.Goal}}</goal>
+      <static_context source="run.context">{{.Context}}</static_context>
+      <constraints source="run.constraints">{{.Constraints}}</constraints>
+      <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
+      <next_focus source="stage.reflect">{{.NextFocus}}</next_focus>
+      </run_context>
+      <frame_output source="stage.frame">{{.Frame}}</frame_output>
+      <output_contract format="markdown">
+      Return a short numbered plan for this loop. Prefer one concrete next action.
+      </output_contract>
+      </stage>
+    act: |
+      <stage name="act">
+      <role>You are in the ACT stage for an autonomous run.</role>
+      <run_context version="1">
+      <goal source="run.goal">{{.Goal}}</goal>
+      <static_context source="run.context">{{.Context}}</static_context>
+      <constraints source="run.constraints">{{.Constraints}}</constraints>
+      <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
+      <memory source="workspace.memory">{{.Memory}}</memory>
+      </run_context>
+      <frame_output source="stage.frame">{{.Frame}}</frame_output>
+      <plan_output source="stage.plan">{{.Plan}}</plan_output>
+      <available_tools source="runtime.bound_tools">
+      <tool>sys_internal_ip</tool>
+      <tool>sys_external_ip</tool>
+      <note>Additional tools may be available at runtime (for example ductile_*).</note>
+      </available_tools>
+      <output_contract format="markdown">
+      Execute the best next action. Use tools when needed.
+      When complete for this loop, provide a concise action result.
+      </output_contract>
+      </stage>
+    reflect: |
+      <stage name="reflect">
+      <role>You are in the REFLECT stage for an autonomous run.</role>
+      <run_context version="1">
+      <goal source="run.goal">{{.Goal}}</goal>
+      <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
+      </run_context>
+      <frame_output source="stage.frame">{{.Frame}}</frame_output>
+      <plan_output source="stage.plan">{{.Plan}}</plan_output>
+      <act_output source="stage.act">{{.Act}}</act_output>
+      <output_contract format="json">
+      Return JSON only:
+      {"done": boolean, "summary": "string", "next_focus": "string"}
+      </output_contract>
+      </stage>
