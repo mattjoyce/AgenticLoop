@@ -1,0 +1,158 @@
+# AgenticLoop
+
+An autonomous agent orchestration service that runs a staged, iterative reasoning loop for AI agents. Designed as an external sibling service to [Ductile](https://github.com/mattjoyce/ductile), allowing long-running agent tasks to execute asynchronously without blocking a tool gateway scheduler.
+
+## Overview
+
+AgenticLoop accepts a goal via HTTP, then runs the agent through repeated **Frame → Plan → Act → Reflect** cycles until the task is complete or limits are reached. Each run is isolated in its own workspace with persistent memory across iterations.
+
+```
+POST /v1/wake  →  Runner (serial queue)  →  Loop (Frame/Plan/Act/Reflect)
+                                               ↓
+                                          Workspace (memory, tool logs)
+                                               ↓
+                                          SQLite (runs, steps)
+                                               ↓
+                                     Optional completion callback
+```
+
+## Features
+
+- **Staged loop**: Structured Frame → Plan → Act → Reflect cycle, not free-form tool use
+- **Memory layers**: `run_memory` (cross-iteration) and `loop_memory` (per-iteration transcript)
+- **Tool integration**: Built-in workspace file tools + Ductile plugin tools via allowlist
+- **Pluggable LLM**: Anthropic Claude, OpenAI, or Ollama via the [Eino](https://github.com/cloudwego/eino) framework
+- **Completion gate**: Agent must call `report_success` before it can mark itself done
+- **Idempotency**: Optional `wake_id` prevents duplicate runs
+- **Graceful recovery**: Interrupted runs are re-queued on restart
+
+## Requirements
+
+- Go 1.21+
+- A running [Ductile](https://github.com/mattjoyce/ductile) instance (optional, for Ductile tool access)
+- An LLM API key (OpenAI, Anthropic, or a local Ollama instance)
+
+## Configuration
+
+Copy and edit `config.yaml`:
+
+```yaml
+service:
+  name: agenticloop
+  log_level: info
+
+database:
+  path: ./data/agenticloop.db
+
+api:
+  listen: "127.0.0.1:8090"
+  token: "${AGENTICLOOP_API_TOKEN}"
+
+ductile:
+  base_url: "http://127.0.0.1:8080"
+  token: "${DUCTILE_TOOL_TOKEN}"
+  allowlist:
+    - echo/poll
+    - jina-reader/handle
+
+llm:
+  provider: openai          # openai | anthropic | ollama
+  model: gpt-4o-mini
+  api_key: "${OPENAI_API_KEY}"
+
+agent:
+  default_max_loops: 10
+  default_deadline: 5m
+  step_timeout: 120s
+  max_retry_per_step: 3
+  max_act_rounds: 6
+  workspace_dir: ./data/workspaces
+```
+
+Set the required environment variables:
+
+```bash
+export OPENAI_API_KEY=...
+export AGENTICLOOP_API_TOKEN=...
+export DUCTILE_TOOL_TOKEN=...        # only needed if using Ductile tools
+```
+
+## Running
+
+```bash
+go build ./cmd/agenticloop
+./agenticloop start --config config.yaml
+```
+
+## API
+
+All endpoints except `/healthz` require a Bearer token (`Authorization: Bearer <token>`).
+
+### POST /v1/wake
+
+Start or resume a run. Returns immediately with `202 Accepted`.
+
+```json
+{
+  "wake_id": "optional-idempotency-key",
+  "goal": "Summarise the linked article and save it to notes.md",
+  "context": { "url": "https://example.com/article" },
+  "constraints": {
+    "max_loops": 5,
+    "deadline": "3m"
+  }
+}
+```
+
+Response:
+
+```json
+{ "run_id": "abc123", "status": "queued", "existing": false }
+```
+
+### GET /v1/runs/{run_id}
+
+Fetch the full run status and step history.
+
+### GET /healthz
+
+Public health check. Returns `{ "status": "ok", "uptime_seconds": N }`.
+
+## Agent Loop Stages
+
+| Stage | Purpose |
+|-------|---------|
+| **Frame** | Analyse the goal, context, and constraints; produce a structured framing |
+| **Plan** | Create a concrete action plan for this iteration |
+| **Act** | Execute tools (workspace file ops, Ductile plugins, system info); multi-round until the LLM stops calling tools |
+| **Reflect** | Assess progress; decide whether to continue or complete; update run memory |
+
+The reflect stage returns a JSON decision:
+
+```json
+{
+  "done": false,
+  "summary": "...",
+  "next_focus": "...",
+  "memory_update": "..."
+}
+```
+
+The agent cannot mark itself done without first calling `report_success`.
+
+## Workspace Tools
+
+Each run has a sandboxed workspace directory. The agent has access to:
+
+- `workspace_read` / `workspace_write` / `workspace_append`
+- `workspace_delete` / `workspace_mkdir` / `workspace_list`
+
+Path traversal outside the workspace is blocked.
+
+## Run States
+
+`queued` → `running` → `done` | `failed`
+
+## Architecture Notes
+
+AgenticLoop is intentionally separate from Ductile. Ductile handles short-lived, stateless jobs. AgenticLoop handles stateful, multi-iteration cognition. Wake requests return immediately; the run executes asynchronously in a serial queue.
