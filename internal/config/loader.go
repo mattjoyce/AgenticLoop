@@ -118,6 +118,8 @@ Return a short numbered plan for this loop. Prefer one concrete next action.
 <tool>sys_internal_ip</tool>
 <tool>sys_external_ip</tool>
 <tool>report_success</tool>
+<note>Workspace file tools may be available at runtime: workspace_read/write/append/edit/delete/mkdir/list.</note>
+<note>workspace_edit defaults to preview (apply=false); apply requires expected_original_sha256 from preview output.</note>
 <note>Additional tools may be available at runtime (for example ductile_*).</note>
 <note>Completion requires calling report_success with summary and evidence.</note>
 </available_tools>
