@@ -190,6 +190,226 @@ func TestWorkspaceAppend(t *testing.T) {
 	}
 }
 
+func TestWorkspaceEditRegexPreviewThenApply(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "doc.txt"), []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	editTool := findWorkspaceTool(t, BuildWorkspaceTools(base), "workspace_edit")
+	ctx := context.Background()
+
+	previewArgs, _ := json.Marshal(map[string]any{
+		"path":    "doc.txt",
+		"mode":    "regex_replace",
+		"search":  "beta",
+		"replace": "gamma",
+	})
+	previewOut, err := editTool.InvokableRun(ctx, string(previewArgs))
+	if err != nil {
+		t.Fatalf("preview error: %v", err)
+	}
+	var previewResp struct {
+		Status       string `json:"status"`
+		Changed      bool   `json:"changed"`
+		Applied      bool   `json:"applied"`
+		MatchCount   int    `json:"match_count"`
+		OriginalHash string `json:"original_sha256"`
+	}
+	if err := json.Unmarshal([]byte(previewOut), &previewResp); err != nil {
+		t.Fatalf("decode preview response: %v", err)
+	}
+	if previewResp.Status != "ok" || !previewResp.Changed || previewResp.Applied || previewResp.MatchCount != 1 {
+		t.Fatalf("unexpected preview response: %+v", previewResp)
+	}
+
+	unchanged, _ := os.ReadFile(filepath.Join(base, "doc.txt"))
+	if string(unchanged) != "alpha\nbeta\n" {
+		t.Fatalf("preview should not change file, got %q", string(unchanged))
+	}
+
+	applyArgs, _ := json.Marshal(map[string]any{
+		"path":                     "doc.txt",
+		"mode":                     "regex_replace",
+		"search":                   "beta",
+		"replace":                  "gamma",
+		"apply":                    true,
+		"expected_original_sha256": previewResp.OriginalHash,
+	})
+	applyOut, err := editTool.InvokableRun(ctx, string(applyArgs))
+	if err != nil {
+		t.Fatalf("apply error: %v", err)
+	}
+	var applyResp struct {
+		Status  string `json:"status"`
+		Changed bool   `json:"changed"`
+		Applied bool   `json:"applied"`
+	}
+	if err := json.Unmarshal([]byte(applyOut), &applyResp); err != nil {
+		t.Fatalf("decode apply response: %v", err)
+	}
+	if applyResp.Status != "ok" || !applyResp.Changed || !applyResp.Applied {
+		t.Fatalf("unexpected apply response: %+v", applyResp)
+	}
+
+	updated, _ := os.ReadFile(filepath.Join(base, "doc.txt"))
+	if string(updated) != "alpha\ngamma\n" {
+		t.Fatalf("unexpected file after apply: %q", string(updated))
+	}
+}
+
+func TestWorkspaceEditRegexRequiresSingleMatch(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "doc.txt"), []byte("dup dup\n"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	editTool := findWorkspaceTool(t, BuildWorkspaceTools(base), "workspace_edit")
+
+	args, _ := json.Marshal(map[string]any{
+		"path":    "doc.txt",
+		"mode":    "regex_replace",
+		"search":  "dup",
+		"replace": "one",
+	})
+	out, err := editTool.InvokableRun(context.Background(), string(args))
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	var resp struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "error" || resp.Error == "" {
+		t.Fatalf("expected tool error response, got %+v", resp)
+	}
+}
+
+func TestWorkspaceEditLineReplace(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "doc.txt"), []byte("a\nb\nc\n"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	editTool := findWorkspaceTool(t, BuildWorkspaceTools(base), "workspace_edit")
+	ctx := context.Background()
+
+	previewArgs, _ := json.Marshal(map[string]any{
+		"path":       "doc.txt",
+		"mode":       "line_replace",
+		"start_line": 2,
+		"end_line":   3,
+		"replace":    "x\ny\n",
+	})
+	previewOut, err := editTool.InvokableRun(ctx, string(previewArgs))
+	if err != nil {
+		t.Fatalf("preview error: %v", err)
+	}
+	var previewResp struct {
+		Status       string `json:"status"`
+		Changed      bool   `json:"changed"`
+		OriginalHash string `json:"original_sha256"`
+	}
+	if err := json.Unmarshal([]byte(previewOut), &previewResp); err != nil {
+		t.Fatalf("decode preview response: %v", err)
+	}
+	if previewResp.Status != "ok" || !previewResp.Changed {
+		t.Fatalf("unexpected preview response: %+v", previewResp)
+	}
+
+	applyArgs, _ := json.Marshal(map[string]any{
+		"path":                     "doc.txt",
+		"mode":                     "line_replace",
+		"start_line":               2,
+		"end_line":                 3,
+		"replace":                  "x\ny\n",
+		"apply":                    true,
+		"expected_original_sha256": previewResp.OriginalHash,
+	})
+	applyOut, err := editTool.InvokableRun(ctx, string(applyArgs))
+	if err != nil {
+		t.Fatalf("apply error: %v", err)
+	}
+	var applyResp struct {
+		Status  string `json:"status"`
+		Applied bool   `json:"applied"`
+	}
+	if err := json.Unmarshal([]byte(applyOut), &applyResp); err != nil {
+		t.Fatalf("decode apply response: %v", err)
+	}
+	if applyResp.Status != "ok" || !applyResp.Applied {
+		t.Fatalf("unexpected apply response: %+v", applyResp)
+	}
+
+	updated, _ := os.ReadFile(filepath.Join(base, "doc.txt"))
+	if string(updated) != "a\nx\ny\n" {
+		t.Fatalf("unexpected file after line replace: %q", string(updated))
+	}
+}
+
+func TestWorkspaceEditNoChange(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "doc.txt"), []byte("unchanged\n"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	editTool := findWorkspaceTool(t, BuildWorkspaceTools(base), "workspace_edit")
+
+	args, _ := json.Marshal(map[string]any{
+		"path":    "doc.txt",
+		"mode":    "regex_replace",
+		"search":  "unchanged",
+		"replace": "unchanged",
+		"apply":   true,
+	})
+	out, err := editTool.InvokableRun(context.Background(), string(args))
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	var resp struct {
+		Status   string `json:"status"`
+		Changed  bool   `json:"changed"`
+		NoChange bool   `json:"no_change"`
+		Applied  bool   `json:"applied"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "ok" || resp.Changed || !resp.NoChange || resp.Applied {
+		t.Fatalf("unexpected no-change response: %+v", resp)
+	}
+}
+
+func TestWorkspaceEditApplyRequiresHash(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "doc.txt"), []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	editTool := findWorkspaceTool(t, BuildWorkspaceTools(base), "workspace_edit")
+
+	args, _ := json.Marshal(map[string]any{
+		"path":    "doc.txt",
+		"mode":    "regex_replace",
+		"search":  "beta",
+		"replace": "gamma",
+		"apply":   true,
+	})
+	out, err := editTool.InvokableRun(context.Background(), string(args))
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	var resp struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "error" || resp.Error == "" {
+		t.Fatalf("expected error response, got %+v", resp)
+	}
+}
+
 func TestWorkspaceDelete(t *testing.T) {
 	base := t.TempDir()
 	tools := BuildWorkspaceTools(base)
@@ -313,4 +533,15 @@ func TestWorkspaceObserver(t *testing.T) {
 	if !called {
 		t.Fatalf("observer was not called")
 	}
+}
+
+func findWorkspaceTool(t *testing.T, tools []*WorkspaceFileTool, name string) *WorkspaceFileTool {
+	t.Helper()
+	for _, tt := range tools {
+		if tt.name == name {
+			return tt
+		}
+	}
+	t.Fatalf("tool %q not found", name)
+	return nil
 }
