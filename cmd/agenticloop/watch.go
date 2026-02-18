@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -270,7 +271,7 @@ func (m *watchModel) handleEvent(event string, data []byte) {
 		if err := json.Unmarshal(data, &payload); err != nil {
 			payload.Error = "unknown stream error"
 		}
-		m.err = fmt.Errorf(payload.Error)
+		m.err = errors.New(payload.Error)
 		m.appendEvent(fmt.Sprintf("[%s] stream error: %s", time.Now().Format("15:04:05"), payload.Error))
 	default:
 		m.appendEvent(fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), event))
