@@ -146,6 +146,47 @@ func (c *Client) Callback(ctx context.Context, callbackURL string, payload map[s
 	return nil
 }
 
+// PluginDetailResponse holds the discovery response for a plugin.
+type PluginDetailResponse struct {
+	Name     string        `json:"name"`
+	Commands []PluginCommand `json:"commands"`
+}
+
+// PluginCommand holds metadata and schemas for a single plugin command.
+type PluginCommand struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"input_schema"`
+}
+
+// GetPluginDetail fetches command metadata from GET /plugin/{name}.
+func (c *Client) GetPluginDetail(ctx context.Context, plugin string) (*PluginDetailResponse, error) {
+	url := fmt.Sprintf("%s/plugin/%s", c.baseURL, plugin)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get plugin %s: %w", plugin, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get plugin %s: status %d: %s", plugin, resp.StatusCode, string(respBody))
+	}
+
+	var detail PluginDetailResponse
+	if err := json.Unmarshal(respBody, &detail); err != nil {
+		return nil, fmt.Errorf("parse plugin detail: %w", err)
+	}
+	return &detail, nil
+}
+
 // GetJob retrieves the status of a job.
 func (c *Client) GetJob(ctx context.Context, jobID string) (*JobStatusResponse, error) {
 	url := fmt.Sprintf("%s/job/%s", c.baseURL, jobID)
