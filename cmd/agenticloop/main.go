@@ -34,6 +34,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
+	case "watch":
+		if err := runWatch(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 	case "version":
 		fmt.Printf("agenticloop %s\n", version)
 	default:
@@ -48,6 +53,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Commands:")
 	fmt.Fprintln(os.Stderr, "  start     Start the AgenticLoop service")
+	fmt.Fprintln(os.Stderr, "  watch     Watch a run event stream in a TUI")
 	fmt.Fprintln(os.Stderr, "  version   Print version")
 }
 

@@ -85,6 +85,9 @@ export DUCTILE_TOOL_TOKEN=...        # only needed if using Ductile tools
 ```bash
 go build ./cmd/agenticloop
 ./agenticloop start --config config.yaml
+
+# Watch a live run stream (blue/orange TUI)
+./agenticloop watch --api http://127.0.0.1:8090 --token "$AGENTICLOOP_API_TOKEN" <run_id>
 ```
 
 ## API
@@ -117,6 +120,16 @@ Response:
 
 Fetch the full run status and step history.
 
+### GET /v1/runs/{run_id}/events
+
+Server-Sent Events stream for live run updates. Emits:
+
+- `snapshot` (initial run + steps)
+- `run.updated`
+- `step.created`
+- `step.updated`
+- `stream.closed` (on terminal state)
+
 ### GET /healthz
 
 Public health check. Returns `{ "status": "ok", "uptime_seconds": N }`.
@@ -148,6 +161,7 @@ The agent cannot mark itself done without first calling `report_success`.
 Each run has a sandboxed workspace directory. The agent has access to:
 
 - `workspace_read` / `workspace_write` / `workspace_append`
+- `workspace_edit` (preview by default; apply with `expected_original_sha256`)
 - `workspace_delete` / `workspace_mkdir` / `workspace_list`
 
 Path traversal outside the workspace is blocked.
