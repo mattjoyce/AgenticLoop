@@ -55,7 +55,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Addr:         s.config.Listen,
 		Handler:      router,
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: 0, // SSE endpoints are long-lived streams.
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -99,6 +99,7 @@ func (s *Server) setupRoutes() *chi.Mux {
 		r.Use(s.bearerAuth)
 		r.Post("/v1/wake", s.handleWake)
 		r.Get("/v1/runs/{run_id}", s.handleGetRun)
+		r.Get("/v1/runs/{run_id}/events", s.handleRunEvents)
 	})
 
 	return r

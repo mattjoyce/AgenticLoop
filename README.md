@@ -82,6 +82,9 @@ export DUCTILE_TOOL_TOKEN=...        # only needed if using Ductile tools
 ```bash
 go build ./cmd/agenticloop
 ./agenticloop start --config config.yaml
+
+# Watch a live run stream (blue/orange TUI)
+./agenticloop watch --api http://127.0.0.1:8090 --token "$AGENTICLOOP_API_TOKEN" <run_id>
 ```
 
 ## API
@@ -113,6 +116,16 @@ Response:
 ### GET /v1/runs/{run_id}
 
 Fetch the full run status and step history.
+
+### GET /v1/runs/{run_id}/events
+
+Server-Sent Events stream for live run updates. Emits:
+
+- `snapshot` (initial run + steps)
+- `run.updated`
+- `step.created`
+- `step.updated`
+- `stream.closed` (on terminal state)
 
 ### GET /healthz
 

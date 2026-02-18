@@ -1,8 +1,12 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -132,6 +136,214 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		CompletedAt: run.CompletedAt,
 		CreatedAt:   run.CreatedAt,
 	})
+}
+
+// handleRunEvents handles GET /v1/runs/{run_id}/events using Server-Sent Events.
+func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "run_id")
+
+	run, err := s.runs.GetByID(r.Context(), runID)
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	stepStore := store.NewStepStore(s.runs.DB())
+	steps, err := stepStore.GetByRunID(r.Context(), runID)
+	if err != nil {
+		s.logger.Error("failed to get steps for stream snapshot", "run_id", runID, "error", err)
+		steps = nil
+	}
+
+	if err := writeSSEEvent(w, flusher, "snapshot", map[string]any{
+		"type":      "snapshot",
+		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"run_id":    runID,
+		"run":       run,
+		"steps":     steps,
+	}); err != nil {
+		return
+	}
+
+	runSig := runStreamSignature(run)
+	stepSigs := make(map[string]string, len(steps))
+	for _, step := range steps {
+		stepSigs[step.ID] = stepStreamSignature(step)
+	}
+	if run.Status == store.RunStatusDone || run.Status == store.RunStatusFailed {
+		_ = writeSSEEvent(w, flusher, "stream.closed", map[string]any{
+			"type":      "stream.closed",
+			"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+			"run_id":    runID,
+			"status":    run.Status,
+		})
+		return
+	}
+
+	pollTicker := time.NewTicker(700 * time.Millisecond)
+	heartbeatTicker := time.NewTicker(15 * time.Second)
+	defer pollTicker.Stop()
+	defer heartbeatTicker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeatTicker.C:
+			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-pollTicker.C:
+			currentRun, err := s.runs.GetByID(r.Context(), runID)
+			if err != nil {
+				_ = writeSSEEvent(w, flusher, "error", map[string]any{
+					"type":      "error",
+					"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+					"run_id":    runID,
+					"error":     "run not found",
+				})
+				return
+			}
+
+			if currentSig := runStreamSignature(currentRun); currentSig != runSig {
+				runSig = currentSig
+				if err := writeSSEEvent(w, flusher, "run.updated", map[string]any{
+					"type":      "run.updated",
+					"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+					"run_id":    runID,
+					"run":       currentRun,
+				}); err != nil {
+					return
+				}
+			}
+
+			currentSteps, err := stepStore.GetByRunID(r.Context(), runID)
+			if err != nil {
+				s.logger.Error("failed to get steps for stream update", "run_id", runID, "error", err)
+				continue
+			}
+			for _, step := range currentSteps {
+				sig := stepStreamSignature(step)
+				prev, ok := stepSigs[step.ID]
+				if !ok {
+					stepSigs[step.ID] = sig
+					if err := writeSSEEvent(w, flusher, "step.created", map[string]any{
+						"type":      "step.created",
+						"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+						"run_id":    runID,
+						"step":      step,
+					}); err != nil {
+						return
+					}
+					continue
+				}
+				if prev != sig {
+					stepSigs[step.ID] = sig
+					if err := writeSSEEvent(w, flusher, "step.updated", map[string]any{
+						"type":      "step.updated",
+						"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+						"run_id":    runID,
+						"step":      step,
+					}); err != nil {
+						return
+					}
+				}
+			}
+
+			if currentRun.Status == store.RunStatusDone || currentRun.Status == store.RunStatusFailed {
+				_ = writeSSEEvent(w, flusher, "stream.closed", map[string]any{
+					"type":      "stream.closed",
+					"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+					"run_id":    runID,
+					"status":    currentRun.Status,
+				})
+				return
+			}
+		}
+	}
+}
+
+func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, payload any) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if _, err := fmt.Fprintf(w, "data: %s\n", line); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprint(w, "\n"); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
+}
+
+func runStreamSignature(run *store.Run) string {
+	if run == nil {
+		return ""
+	}
+	raw := []byte(fmt.Sprintf(
+		"%s|%s|%s|%s|%s",
+		run.ID,
+		run.Status,
+		derefString(run.Summary),
+		derefString(run.Error),
+		run.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	))
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func stepStreamSignature(step *store.Step) string {
+	if step == nil {
+		return ""
+	}
+	raw := []byte(fmt.Sprintf(
+		"%s|%d|%s|%s|%s|%s|%s|%s|%s|%s",
+		step.ID,
+		step.StepNum,
+		step.Phase,
+		step.Status,
+		derefString(step.Tool),
+		string(step.ToolInput),
+		string(step.ToolOutput),
+		derefString(step.Error),
+		derefTime(step.StartedAt),
+		derefTime(step.CompletedAt),
+	))
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func derefTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 func respondJSON(w http.ResponseWriter, statusCode int, data any) {
