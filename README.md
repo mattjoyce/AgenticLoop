@@ -148,6 +148,7 @@ The agent cannot mark itself done without first calling `report_success`.
 Each run has a sandboxed workspace directory. The agent has access to:
 
 - `workspace_read` / `workspace_write` / `workspace_append`
+- `workspace_edit` (preview by default; apply with `expected_original_sha256`)
 - `workspace_delete` / `workspace_mkdir` / `workspace_list`
 
 Path traversal outside the workspace is blocked.

@@ -82,11 +82,13 @@ agent:
       <tool>workspace_read — read a file (path, max_lines)</tool>
       <tool>workspace_list — list directory entries (path)</tool>
       <tool>workspace_append — append to a file (path, content)</tool>
+      <tool>workspace_edit — preview/edit existing file with regex_replace or line_replace</tool>
       <tool>workspace_delete — delete a file (path)</tool>
       <tool>workspace_mkdir — create directory and parents (path)</tool>
       <tool>report_success</tool>
       <note>Additional tools may be available at runtime (for example ductile_*).</note>
       <note>Workspace tools are sandboxed to the run workspace. Use relative paths only.</note>
+      <note>workspace_edit defaults to preview (apply=false); applying requires expected_original_sha256 from preview output.</note>
       <note>Completion requires calling report_success with summary and evidence.</note>
       </available_tools>
       <output_contract format="markdown">
