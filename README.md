@@ -20,7 +20,9 @@ POST /v1/wake  →  Runner (serial queue)  →  Loop (Frame/Plan/Act/Reflect)
 
 - **Staged loop**: Structured Frame → Plan → Act → Reflect cycle, not free-form tool use
 - **Memory layers**: `run_memory` (cross-iteration) and `loop_memory` (per-iteration transcript)
+- **Loop memory archiving**: Optionally archive each iteration's `loop_memory.md` for per-iteration audit and debugging
 - **Tool integration**: Built-in workspace file tools + Ductile plugin tools via allowlist
+- **Typed Ductile tools**: Fetches plugin schemas from the Ductile discovery API so the LLM receives correct parameter names and types, not a generic payload object
 - **Pluggable LLM**: Anthropic Claude, OpenAI, or Ollama via the [Eino](https://github.com/cloudwego/eino) framework
 - **Completion gate**: Agent must call `report_success` before it can mark itself done
 - **Idempotency**: Optional `wake_id` prevents duplicate runs
@@ -67,6 +69,7 @@ agent:
   max_retry_per_step: 3
   max_act_rounds: 6
   workspace_dir: ./data/workspaces
+  save_loop_memory: false   # set true to archive loop_memory_iter_{N}.md each iteration
 ```
 
 Set the required environment variables:
@@ -148,6 +151,16 @@ Each run has a sandboxed workspace directory. The agent has access to:
 - `workspace_delete` / `workspace_mkdir` / `workspace_list`
 
 Path traversal outside the workspace is blocked.
+
+### Loop Memory Archiving
+
+When `save_loop_memory: true` is set, `loop_memory.md` (the per-iteration tool call transcript) is copied to `loop_memory_iter_{N}.md` before being cleared at the end of each Reflect stage. This gives a full audit trail of what the LLM saw and did on every iteration, useful for debugging agent behaviour.
+
+## Ductile Tool Integration
+
+Tools from the Ductile gateway are registered from the `allowlist` in config. At runtime, `DuctileTool.Info()` calls `GET /plugin/{name}` on the Ductile discovery API to fetch the command's JSON Schema. This is converted to typed Eino parameters so the LLM receives correct field names, types, and required flags rather than a generic `payload: object`.
+
+If the discovery endpoint is unavailable or returns no schema, it falls back to the old generic payload schema transparently.
 
 ## Run States
 
