@@ -121,6 +121,11 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 		state.Iteration = iter
 		if ws != nil {
 			state.Memory = clipText(ws.ReadRunMemory(), 12000)
+			if l.cfg.SaveLoopMemory && iter > 1 {
+				if err := ws.ArchiveLoopMemory(iter - 1); err != nil {
+					l.logger.Error("failed to archive loop memory", "run_id", run.ID, "iteration", iter-1, "error", err)
+				}
+			}
 			if err := ws.ClearLoopMemory(); err != nil {
 				l.logger.Error("failed to clear loop memory", "run_id", run.ID, "iteration", iter, "error", err)
 			}
@@ -195,6 +200,11 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 			if memoryUpdate != "" {
 				if err := ws.AppendRunMemory(iter, memoryUpdate); err != nil {
 					l.logger.Error("failed to append run memory", "run_id", run.ID, "iteration", iter, "error", err)
+				}
+			}
+			if l.cfg.SaveLoopMemory {
+				if err := ws.ArchiveLoopMemory(iter); err != nil {
+					l.logger.Error("failed to archive loop memory after reflect", "run_id", run.ID, "iteration", iter, "error", err)
 				}
 			}
 			if err := ws.ClearLoopMemory(); err != nil {

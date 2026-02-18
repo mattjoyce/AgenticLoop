@@ -53,6 +53,7 @@ type AgentConfig struct {
 	MaxRetryPerStep int           `yaml:"max_retry_per_step"`
 	MaxActRounds    int           `yaml:"max_act_rounds"`
 	WorkspaceDir    string        `yaml:"workspace_dir"`
+	SaveLoopMemory  bool          `yaml:"save_loop_memory"`
 	Prompts         AgentPrompts  `yaml:"prompts"`
 }
 

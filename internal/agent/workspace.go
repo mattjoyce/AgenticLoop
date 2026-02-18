@@ -65,6 +65,20 @@ func (w *Workspace) ClearLoopMemory() error {
 	return nil
 }
 
+// ArchiveLoopMemory copies the current loop_memory.md to loop_memory_iter_{iter}.md
+// if the file is non-empty. A no-op when loop memory is empty.
+func (w *Workspace) ArchiveLoopMemory(iter int) error {
+	data, err := os.ReadFile(w.loopMemoryPath)
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return nil
+	}
+	dst := filepath.Join(w.dir, fmt.Sprintf("loop_memory_iter_%d.md", iter))
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		return fmt.Errorf("archive loop memory iter %d: %w", iter, err)
+	}
+	return nil
+}
+
 // AppendRunMemory appends distilled reflective memory for cross-loop context.
 func (w *Workspace) AppendRunMemory(iteration int, text string) error {
 	if strings.TrimSpace(text) == "" {
