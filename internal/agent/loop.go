@@ -111,6 +111,9 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 		l.emitCallback(ctx, callbackURL, run.ID, "failed", nil, &errMsg)
 		return err
 	}
+	state.AvailableTools = buildToolCatalog(toolset.infos)
+
+	nextStage := "frame" // first iteration always starts at frame
 
 	for iter := 1; iter <= maxLoops; iter++ {
 		select {
@@ -131,30 +134,36 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 			}
 		}
 
-		framePrompt := l.renderPrompt(l.cfg.Prompts.Frame, state)
-		if ws != nil {
-			_ = ws.AppendStagePrompt(iter, "frame", framePrompt)
-		}
-		frameOut, err := l.runTextStage(ctx, framePrompt, "Produce the frame now.")
-		if err != nil {
-			return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("frame stage: %w", err))
-		}
-		state.Frame = frameOut
-		if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseFrame, frameOut); err != nil {
-			l.logger.Error("failed to persist frame step", "run_id", run.ID, "error", err)
+		l.logger.Info("loop iteration", "run_id", run.ID, "iter", iter, "next_stage", nextStage)
+
+		if nextStage == "frame" {
+			framePrompt := l.renderPrompt(l.cfg.Prompts.Frame, state)
+			if ws != nil {
+				_ = ws.AppendStagePrompt(iter, "frame", framePrompt)
+			}
+			frameOut, err := l.runTextStage(ctx, framePrompt, "Produce the frame now.")
+			if err != nil {
+				return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("frame stage: %w", err))
+			}
+			state.Frame = frameOut
+			if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseFrame, frameOut); err != nil {
+				l.logger.Error("failed to persist frame step", "run_id", run.ID, "error", err)
+			}
 		}
 
-		planPrompt := l.renderPrompt(l.cfg.Prompts.Plan, state)
-		if ws != nil {
-			_ = ws.AppendStagePrompt(iter, "plan", planPrompt)
-		}
-		planOut, err := l.runTextStage(ctx, planPrompt, "Produce the plan now.")
-		if err != nil {
-			return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("plan stage: %w", err))
-		}
-		state.Plan = planOut
-		if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhasePlan, planOut); err != nil {
-			l.logger.Error("failed to persist plan step", "run_id", run.ID, "error", err)
+		if nextStage == "frame" || nextStage == "plan" {
+			planPrompt := l.renderPrompt(l.cfg.Prompts.Plan, state)
+			if ws != nil {
+				_ = ws.AppendStagePrompt(iter, "plan", planPrompt)
+			}
+			planOut, err := l.runTextStage(ctx, planPrompt, "Produce the plan now.")
+			if err != nil {
+				return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("plan stage: %w", err))
+			}
+			state.Plan = planOut
+			if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhasePlan, planOut); err != nil {
+				l.logger.Error("failed to persist plan step", "run_id", run.ID, "error", err)
+			}
 		}
 
 		actPrompt := l.renderPrompt(l.cfg.Prompts.Act, state)
@@ -212,10 +221,14 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 			}
 		}
 
-		if decision.Done {
+		nextStage = decision.resolvedNextStage()
+		l.logger.Info("reflect decision", "run_id", run.ID, "iter", iter, "next_stage", nextStage)
+
+		if nextStage == "done" {
 			if !state.SuccessReported {
 				state.NextFocus = "Call report_success with summary and evidence before declaring done."
 				l.logger.Info("reflect requested done but report_success not yet called; continuing", "run_id", run.ID, "iteration", iter)
+				nextStage = "plan"
 				continue
 			}
 
@@ -259,6 +272,7 @@ type stageState struct {
 	Plan            string
 	Act             string
 	NextFocus       string
+	AvailableTools  string
 	SuccessReported bool
 	SuccessSummary  string
 	Iteration       int
@@ -266,15 +280,29 @@ type stageState struct {
 }
 
 type reflectDecision struct {
-	Done         bool   `json:"done"`
+	NextStage    string `json:"next_stage"` // "plan" | "act" | "done"
+	Done         bool   `json:"done"`       // legacy fallback
 	Summary      string `json:"summary"`
 	NextFocus    string `json:"next_focus"`
 	MemoryUpdate string `json:"memory_update"`
 }
 
+func (d reflectDecision) resolvedNextStage() string {
+	switch d.NextStage {
+	case "plan", "act", "done":
+		return d.NextStage
+	}
+	// legacy fallback
+	if d.Done {
+		return "done"
+	}
+	return "plan"
+}
+
 type preparedToolset struct {
 	model  model.ToolCallingChatModel
 	byName map[string]tool.InvokableTool
+	infos  []*schema.ToolInfo
 }
 
 func (l *Loop) buildToolset(ctx context.Context, tools []tool.BaseTool) (*preparedToolset, error) {
@@ -299,7 +327,7 @@ func (l *Loop) buildToolset(ctx context.Context, tools []tool.BaseTool) (*prepar
 		return nil, fmt.Errorf("bind tools: %w", err)
 	}
 
-	return &preparedToolset{model: toolModel, byName: byName}, nil
+	return &preparedToolset{model: toolModel, byName: byName, infos: infos}, nil
 }
 
 func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (string, error) {
@@ -504,6 +532,19 @@ func jsonOrNull(raw json.RawMessage) string {
 		return "null"
 	}
 	return string(raw)
+}
+
+func buildToolCatalog(infos []*schema.ToolInfo) string {
+	var b strings.Builder
+	for _, info := range infos {
+		b.WriteString(info.Name)
+		if info.Desc != "" {
+			b.WriteString(" — ")
+			b.WriteString(info.Desc)
+		}
+		b.WriteByte('\n')
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func clipText(s string, max int) string {

@@ -85,91 +85,6 @@ func applyDefaults(cfg *Config) {
 	if cfg.Agent.WorkspaceDir == "" {
 		cfg.Agent.WorkspaceDir = "./data/workspaces"
 	}
-	if cfg.Agent.Prompts.Frame == "" {
-		cfg.Agent.Prompts.Frame = `<stage name="frame">
-<role>You are in the FRAME stage for an autonomous run.</role>
-<run_context version="1">
-<goal source="run.goal">{{.Goal}}</goal>
-<static_context source="run.context">{{.Context}}</static_context>
-<constraints source="run.constraints">{{.Constraints}}</constraints>
-<loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
-<next_focus source="stage.reflect">{{.NextFocus}}</next_focus>
-<run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
-</run_context>
-<output_contract format="markdown">
-Return concise markdown with:
-- objective
-- known facts
-- unknowns to resolve
-- success condition
-</output_contract>
-</stage>`
-	}
-	if cfg.Agent.Prompts.Plan == "" {
-		cfg.Agent.Prompts.Plan = `<stage name="plan">
-<role>You are in the PLAN stage for an autonomous run.</role>
-<run_context version="1">
-<goal source="run.goal">{{.Goal}}</goal>
-<static_context source="run.context">{{.Context}}</static_context>
-<constraints source="run.constraints">{{.Constraints}}</constraints>
-<loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
-<next_focus source="stage.reflect">{{.NextFocus}}</next_focus>
-<run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
-</run_context>
-<frame_output source="stage.frame">{{.Frame}}</frame_output>
-<output_contract format="markdown">
-Return a short numbered plan for this loop. Prefer one concrete next action.
-</output_contract>
-</stage>`
-	}
-	if cfg.Agent.Prompts.Act == "" {
-		cfg.Agent.Prompts.Act = `<stage name="act">
-<role>You are in the ACT stage for an autonomous run.</role>
-<run_context version="1">
-<goal source="run.goal">{{.Goal}}</goal>
-<static_context source="run.context">{{.Context}}</static_context>
-<constraints source="run.constraints">{{.Constraints}}</constraints>
-<loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
-<run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
-</run_context>
-<frame_output source="stage.frame">{{.Frame}}</frame_output>
-<plan_output source="stage.plan">{{.Plan}}</plan_output>
-<available_tools source="runtime.bound_tools">
-<tool>sys_internal_ip</tool>
-<tool>sys_external_ip</tool>
-<tool>report_success</tool>
-<note>Workspace file tools may be available at runtime: workspace_read/write/append/edit/delete/mkdir/list.</note>
-<note>workspace_edit defaults to preview (apply=false); apply requires expected_original_sha256 from preview output.</note>
-<note>Additional tools may be available at runtime (for example ductile_*).</note>
-<note>Completion requires calling report_success with summary and evidence.</note>
-</available_tools>
-<output_contract format="markdown">
-Execute the best next action. Use tools when needed.
-When complete for this loop, provide a concise action result.
-</output_contract>
-</stage>`
-	}
-	if cfg.Agent.Prompts.Reflect == "" {
-		cfg.Agent.Prompts.Reflect = `<stage name="reflect">
-<role>You are in the REFLECT stage for an autonomous run.</role>
-<run_context version="1">
-<goal source="run.goal">{{.Goal}}</goal>
-<loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
-<run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
-<loop_memory source="workspace.loop_memory">{{.LoopMemory}}</loop_memory>
-</run_context>
-<frame_output source="stage.frame">{{.Frame}}</frame_output>
-<plan_output source="stage.plan">{{.Plan}}</plan_output>
-<act_output source="stage.act">{{.Act}}</act_output>
-<completion_gate success_tool="report_success" success_tool_called="{{.SuccessReported}}">
-<reported_summary>{{.SuccessSummary}}</reported_summary>
-</completion_gate>
-<output_contract format="json">
-Return JSON only:
-{"done": boolean, "summary": "string", "next_focus": "string", "memory_update": "string"}
-</output_contract>
-</stage>`
-	}
 }
 
 func validate(cfg *Config) error {
@@ -209,6 +124,18 @@ func validate(cfg *Config) error {
 		if len(matches) > 1 {
 			return fmt.Errorf("ductile.token: environment variable ${%s} is not set", matches[1])
 		}
+	}
+	if cfg.Agent.Prompts.Frame == "" {
+		return fmt.Errorf("agent.prompts.frame is required")
+	}
+	if cfg.Agent.Prompts.Plan == "" {
+		return fmt.Errorf("agent.prompts.plan is required")
+	}
+	if cfg.Agent.Prompts.Act == "" {
+		return fmt.Errorf("agent.prompts.act is required")
+	}
+	if cfg.Agent.Prompts.Reflect == "" {
+		return fmt.Errorf("agent.prompts.reflect is required")
 	}
 	if cfg.Agent.DefaultMaxLoops <= 0 {
 		return fmt.Errorf("agent.default_max_loops must be positive")
