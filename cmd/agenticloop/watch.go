@@ -66,6 +66,7 @@ type pollTickMsg struct{}
 
 type watchModel struct {
 	cfg           watchConfig
+	explicitRunID bool
 	waitingForRun bool
 	streamEvents  chan streamEventMsg
 	width         int
@@ -85,6 +86,7 @@ func newWatchModel(cfg watchConfig) watchModel {
 	}
 	return watchModel{
 		cfg:           cfg,
+		explicitRunID: !waiting,
 		waitingForRun: waiting,
 		streamEvents:  make(chan streamEventMsg, 32),
 		runStatus:     status,
@@ -135,13 +137,12 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.EOF {
-			m.done = true
 			m.appendEvent("stream closed by server")
-			return m, nil
+			return m, m.resetToWaiting()
 		}
 		m.handleEvent(msg.Event, msg.Data)
 		if m.done {
-			return m, nil
+			return m, m.resetToWaiting()
 		}
 		return m, waitForStreamEventCmd(m.streamEvents)
 	default:
@@ -331,6 +332,21 @@ func (m *watchModel) appendEvent(line string) {
 	if len(m.events) > 800 {
 		m.events = m.events[len(m.events)-800:]
 	}
+}
+
+// resetToWaiting resets model state to poll for the next run.
+// If a run_id was given explicitly on the CLI, it returns tea.Quit instead.
+func (m *watchModel) resetToWaiting() tea.Cmd {
+	if m.explicitRunID {
+		return tea.Quit
+	}
+	m.cfg.RunID = ""
+	m.waitingForRun = true
+	m.connected = false
+	m.done = false
+	m.err = nil
+	m.runStatus = "waiting"
+	return pollForRunCmd(m.cfg.APIBase, m.cfg.Token)
 }
 
 func pollForRunCmd(apiBase, token string) tea.Cmd {
