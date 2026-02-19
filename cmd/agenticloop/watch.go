@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,8 +25,8 @@ func runWatch(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: agenticloop watch [--api <url>] [--token <token>] <run_id>")
+	if fs.NArg() > 1 {
+		return fmt.Errorf("usage: agenticloop watch [--api <url>] [--token <token>] [run_id]")
 	}
 	if strings.TrimSpace(*token) == "" {
 		return fmt.Errorf("token is required (use --token or AGENTICLOOP_API_TOKEN)")
@@ -57,27 +58,43 @@ type streamEventMsg struct {
 
 type streamStartedMsg struct{}
 
+type runFoundMsg struct {
+	RunID string
+}
+
+type pollTickMsg struct{}
+
 type watchModel struct {
-	cfg          watchConfig
-	streamEvents chan streamEventMsg
-	width        int
-	height       int
-	connected    bool
-	done         bool
-	err          error
-	runStatus    string
-	events       []string
+	cfg           watchConfig
+	waitingForRun bool
+	streamEvents  chan streamEventMsg
+	width         int
+	height        int
+	connected     bool
+	done          bool
+	err           error
+	runStatus     string
+	events        []string
 }
 
 func newWatchModel(cfg watchConfig) watchModel {
+	waiting := cfg.RunID == ""
+	status := "connecting"
+	if waiting {
+		status = "waiting"
+	}
 	return watchModel{
-		cfg:          cfg,
-		streamEvents: make(chan streamEventMsg, 32),
-		runStatus:    "connecting",
+		cfg:           cfg,
+		waitingForRun: waiting,
+		streamEvents:  make(chan streamEventMsg, 32),
+		runStatus:     status,
 	}
 }
 
 func (m watchModel) Init() tea.Cmd {
+	if m.waitingForRun {
+		return pollForRunCmd(m.cfg.APIBase, m.cfg.Token)
+	}
 	return tea.Batch(
 		startEventStreamCmd(m.cfg, m.streamEvents),
 		waitForStreamEventCmd(m.streamEvents),
@@ -96,6 +113,18 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, nil
+	case pollTickMsg:
+		return m, pollForRunCmd(m.cfg.APIBase, m.cfg.Token)
+	case runFoundMsg:
+		m.cfg.RunID = msg.RunID
+		m.waitingForRun = false
+		m.runStatus = "connecting"
+		m.streamEvents = make(chan streamEventMsg, 32)
+		m.appendEvent(fmt.Sprintf("[%s] found run %s", time.Now().Format("15:04:05"), msg.RunID))
+		return m, tea.Batch(
+			startEventStreamCmd(m.cfg, m.streamEvents),
+			waitForStreamEventCmd(m.streamEvents),
+		)
 	case streamStartedMsg:
 		m.connected = true
 		return m, nil
@@ -133,16 +162,26 @@ func (m watchModel) View() string {
 		Foreground(lipgloss.Color("#0B1B36")).
 		Background(lipgloss.Color("#FF9F43")).
 		Padding(0, 1)
-	if m.runStatus == "done" {
+	switch m.runStatus {
+	case "waiting":
+		statusStyle = statusStyle.Background(lipgloss.Color("#6B7280"))
+	case "done":
 		statusStyle = statusStyle.Background(lipgloss.Color("#60A5FA"))
-	}
-	if m.runStatus == "failed" {
+	case "failed":
 		statusStyle = statusStyle.Background(lipgloss.Color("#FB7185"))
 	}
 
+	runLabel := m.cfg.RunID
+	if runLabel == "" {
+		runLabel = "-"
+	}
+	streamLabel := connectionLabel(m.connected, m.done, m.err)
+	if m.waitingForRun {
+		streamLabel = "polling"
+	}
 	meta := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#A8C7FF")).
-		Render(fmt.Sprintf("run=%s  api=%s  stream=%s", m.cfg.RunID, m.cfg.APIBase, connectionLabel(m.connected, m.done, m.err)))
+		Render(fmt.Sprintf("run=%s  api=%s  stream=%s", runLabel, m.cfg.APIBase, streamLabel))
 
 	status := statusStyle.Render(strings.ToUpper(m.runStatus))
 	footer := lipgloss.NewStyle().
@@ -165,7 +204,11 @@ func (m watchModel) View() string {
 	}
 	lines := m.events
 	if len(lines) == 0 {
-		lines = []string{"waiting for events..."}
+		if m.waitingForRun {
+			lines = []string{"waiting for active run..."}
+		} else {
+			lines = []string{"waiting for events..."}
+		}
 	}
 	if len(lines) > bodyHeight {
 		lines = lines[len(lines)-bodyHeight:]
@@ -227,29 +270,34 @@ func (m *watchModel) handleEvent(event string, data []byte) {
 	case "step.created", "step.updated":
 		var payload struct {
 			Step struct {
-				StepNum int     `json:"step_num"`
-				Phase   string  `json:"phase"`
-				Status  string  `json:"status"`
-				Tool    *string `json:"tool"`
-				Error   *string `json:"error"`
+				StepNum    int     `json:"step_num"`
+				Phase      string  `json:"phase"`
+				Status     string  `json:"status"`
+				Error      *string `json:"error"`
+				ToolOutput *struct {
+					Content string `json:"content"`
+				} `json:"tool_output"`
 			} `json:"step"`
 		}
 		if err := json.Unmarshal(data, &payload); err != nil {
 			m.appendEvent(event + " (unparsed)")
 			return
 		}
-		tool := "-"
-		if payload.Step.Tool != nil && *payload.Step.Tool != "" {
-			tool = *payload.Step.Tool
-		}
-		line := fmt.Sprintf("[%s] %s #%d %s status=%s tool=%s",
+		line := fmt.Sprintf("[%s] %s #%d %s status=%s",
 			time.Now().Format("15:04:05"),
 			event,
 			payload.Step.StepNum,
 			payload.Step.Phase,
 			payload.Step.Status,
-			tool,
 		)
+		if payload.Step.ToolOutput != nil && payload.Step.ToolOutput.Content != "" {
+			if tools, paths := parseToolOutput(payload.Step.ToolOutput.Content); len(tools) > 0 {
+				line += " tools=" + strings.Join(tools, ",")
+				if len(paths) > 0 {
+					line += " paths=" + strings.Join(paths, ",")
+				}
+			}
+		}
 		if payload.Step.Error != nil && *payload.Step.Error != "" {
 			line += " err=" + trimForLog(*payload.Step.Error, 60)
 		}
@@ -282,6 +330,32 @@ func (m *watchModel) appendEvent(line string) {
 	m.events = append(m.events, line)
 	if len(m.events) > 800 {
 		m.events = m.events[len(m.events)-800:]
+	}
+}
+
+func pollForRunCmd(apiBase, token string) tea.Cmd {
+	return func() tea.Msg {
+		for _, status := range []string{"running", "queued"} {
+			req, err := http.NewRequest(http.MethodGet, apiBase+"/v1/runs?status="+status, nil)
+			if err != nil {
+				break
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				break
+			}
+			var runs []struct {
+				ID string `json:"id"`
+			}
+			json.NewDecoder(resp.Body).Decode(&runs)
+			resp.Body.Close()
+			if len(runs) > 0 {
+				return runFoundMsg{RunID: runs[0].ID}
+			}
+		}
+		time.Sleep(2 * time.Second)
+		return pollTickMsg{}
 	}
 }
 
@@ -399,6 +473,51 @@ func bodyWidth(terminalWidth int) int {
 		return 40
 	}
 	return w
+}
+
+var reToolName = regexp.MustCompile(`(?m)^Tool (\S+) output:`)
+
+// parseToolOutput extracts tool names and any file paths from tool_output.content.
+// Content format: "Tool <name> output:\n{json}\nTool <name> output:\n{json}\n..."
+func parseToolOutput(content string) (tools []string, paths []string) {
+	seen := map[string]bool{}
+	for _, m := range reToolName.FindAllStringSubmatch(content, -1) {
+		name := m[1]
+		if !seen[name] {
+			seen[name] = true
+			tools = append(tools, name)
+		}
+	}
+	// Extract JSON blocks after each "Tool X output:" line and look for path/file fields.
+	pathSeen := map[string]bool{}
+	parts := reToolName.Split(content, -1)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		// The JSON block is the first line(s) before any prose.
+		lines := strings.SplitN(part, "\n", -1)
+		for _, l := range lines {
+			l = strings.TrimSpace(l)
+			if !strings.HasPrefix(l, "{") {
+				continue
+			}
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(l), &obj); err != nil {
+				continue
+			}
+			for _, key := range []string{"path", "file", "filename", "dest"} {
+				if v, ok := obj[key]; ok {
+					if s, ok := v.(string); ok && s != "" && !pathSeen[s] {
+						pathSeen[s] = true
+						paths = append(paths, s)
+					}
+				}
+			}
+		}
+	}
+	return
 }
 
 func connectionLabel(connected, done bool, err error) string {

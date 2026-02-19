@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"time"
 
@@ -26,12 +27,31 @@ func Load(path string) (*Config, error) {
 	}
 
 	applyDefaults(&cfg)
+	resolvePaths(&cfg, path)
 
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	return &cfg, nil
+}
+
+// resolvePaths resolves relative paths in cfg against base_dir.
+// If base_dir is not set, it defaults to the directory containing the config file.
+func resolvePaths(cfg *Config, configFilePath string) {
+	base := cfg.BaseDir
+	if base == "" {
+		base = filepath.Dir(configFilePath)
+	}
+	base, _ = filepath.Abs(base)
+	cfg.BaseDir = base
+
+	if !filepath.IsAbs(cfg.Database.Path) {
+		cfg.Database.Path = filepath.Join(base, cfg.Database.Path)
+	}
+	if !filepath.IsAbs(cfg.Agent.WorkspaceDir) {
+		cfg.Agent.WorkspaceDir = filepath.Join(base, cfg.Agent.WorkspaceDir)
+	}
 }
 
 func applyDefaults(cfg *Config) {

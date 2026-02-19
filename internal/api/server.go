@@ -98,6 +98,7 @@ func (s *Server) setupRoutes() *chi.Mux {
 	r.Group(func(r chi.Router) {
 		r.Use(s.bearerAuth)
 		r.Post("/v1/wake", s.handleWake)
+		r.Get("/v1/runs", s.handleListRuns)
 		r.Get("/v1/runs/{run_id}", s.handleGetRun)
 		r.Get("/v1/runs/{run_id}/events", s.handleRunEvents)
 	})

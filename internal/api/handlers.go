@@ -104,6 +104,37 @@ func (s *Server) handleWake(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleListRuns handles GET /v1/runs?status=<status>.
+// status defaults to "running" if not supplied.
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	statusParam := r.URL.Query().Get("status")
+	if statusParam == "" {
+		statusParam = "running"
+	}
+	runs, err := s.runs.ListByStatus(r.Context(), store.RunStatus(statusParam))
+	if err != nil {
+		s.logger.Error("failed to list runs", "status", statusParam, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "failed to list runs")
+		return
+	}
+	type runSummary struct {
+		ID        string    `json:"id"`
+		Goal      string    `json:"goal"`
+		Status    string    `json:"status"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	out := make([]runSummary, len(runs))
+	for i, run := range runs {
+		out[i] = runSummary{
+			ID:        run.ID,
+			Goal:      run.Goal,
+			Status:    string(run.Status),
+			CreatedAt: run.CreatedAt,
+		}
+	}
+	respondJSON(w, http.StatusOK, out)
+}
+
 // handleGetRun handles GET /v1/runs/{run_id}.
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "run_id")

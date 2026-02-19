@@ -4,6 +4,9 @@ import "time"
 
 // Config represents the complete agenticloop configuration.
 type Config struct {
+	// BaseDir is the root for resolving relative paths in this config.
+	// Defaults to the directory containing the config file if not set.
+	BaseDir  string         `yaml:"base_dir"`
 	Service  ServiceConfig  `yaml:"service"`
 	Database DatabaseConfig `yaml:"database"`
 	API      APIConfig      `yaml:"api"`
