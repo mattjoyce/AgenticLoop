@@ -106,10 +106,7 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 
 	toolset, err := l.buildToolset(ctx, activeTools)
 	if err != nil {
-		errMsg := err.Error()
-		_ = l.runStore.UpdateStatus(ctx, run.ID, store.RunStatusFailed, nil, &errMsg)
-		l.emitCallback(ctx, callbackURL, run.ID, "failed", nil, &errMsg)
-		return err
+		return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("prepare toolset: %w", err))
 	}
 	state.AvailableTools = buildToolCatalog(toolset.infos)
 
@@ -496,8 +493,14 @@ func (l *Loop) failRun(_ context.Context, callbackURL, runID string, err error) 
 	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	errMsg := err.Error()
-	_ = l.runStore.UpdateStatus(bgCtx, runID, store.RunStatusFailed, nil, &errMsg)
+	updateErr := l.runStore.UpdateStatus(bgCtx, runID, store.RunStatusFailed, nil, &errMsg)
+	if updateErr != nil {
+		l.logger.Error("failed to persist failed run status", "run_id", runID, "error", updateErr)
+	}
 	l.emitCallback(bgCtx, callbackURL, runID, "failed", nil, &errMsg)
+	if updateErr != nil {
+		return fmt.Errorf("%w; additionally failed to persist run status: %v", err, updateErr)
+	}
 	return err
 }
 

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -31,8 +32,15 @@ type Runner struct {
 	done  chan struct{}
 }
 
+var ErrQueueFull = errors.New("runner queue is full")
+
 // NewRunner creates a new Runner.
 func NewRunner(runStore *store.RunStore, stepStore *store.StepStore, chatModel model.ToolCallingChatModel, tools []tool.BaseTool, cfg config.AgentConfig, client *ductile.Client, callbackURL string, logger *slog.Logger) *Runner {
+	capacity := cfg.QueueCapacity
+	if capacity <= 0 {
+		capacity = 100
+	}
+
 	return &Runner{
 		runStore:  runStore,
 		stepStore: stepStore,
@@ -42,7 +50,7 @@ func NewRunner(runStore *store.RunStore, stepStore *store.StepStore, chatModel m
 		client:    client,
 		callback:  callbackURL,
 		logger:    logger,
-		queue:     make(chan string, 100),
+		queue:     make(chan string, capacity),
 		done:      make(chan struct{}),
 	}
 }
@@ -58,8 +66,27 @@ func (r *Runner) GetByID(ctx context.Context, id string) (*store.Run, error) {
 }
 
 // Enqueue adds a run ID to the processing queue.
-func (r *Runner) Enqueue(runID string) {
-	r.queue <- runID
+// It returns ErrQueueFull when the queue cannot accept the run within EnqueueTimeout.
+func (r *Runner) Enqueue(runID string) error {
+	timeout := r.cfg.EnqueueTimeout
+	if timeout <= 0 {
+		select {
+		case r.queue <- runID:
+			return nil
+		default:
+			return ErrQueueFull
+		}
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case r.queue <- runID:
+		return nil
+	case <-timer.C:
+		return ErrQueueFull
+	}
 }
 
 // Start runs the serial worker loop. Blocks until context is cancelled.
@@ -83,20 +110,36 @@ func (r *Runner) Done() <-chan struct{} {
 	return r.done
 }
 
-// RecoverRuns finds interrupted runs (status=running) and re-enqueues them.
+// RecoverRuns finds interrupted runs (status=running or queued) and re-enqueues them.
 func (r *Runner) RecoverRuns(ctx context.Context) error {
-	runs, err := r.runStore.ListByStatus(ctx, store.RunStatusRunning)
+	running, err := r.runStore.ListByStatus(ctx, store.RunStatusRunning)
+	if err != nil {
+		return err
+	}
+	queued, err := r.runStore.ListByStatus(ctx, store.RunStatusQueued)
 	if err != nil {
 		return err
 	}
 
-	for _, run := range runs {
-		r.logger.Info("recovering interrupted run", "run_id", run.ID)
-		r.Enqueue(run.ID)
+	seen := make(map[string]struct{}, len(running)+len(queued))
+	enqueued := 0
+
+	for _, run := range append(running, queued...) {
+		if _, ok := seen[run.ID]; ok {
+			continue
+		}
+		seen[run.ID] = struct{}{}
+
+		r.logger.Info("recovering run", "run_id", run.ID, "status", run.Status)
+		if err := r.Enqueue(run.ID); err != nil {
+			r.logger.Warn("failed to enqueue recovered run", "run_id", run.ID, "status", run.Status, "error", err)
+			continue
+		}
+		enqueued++
 	}
 
-	if len(runs) > 0 {
-		r.logger.Info("recovered interrupted runs", "count", len(runs))
+	if len(seen) > 0 {
+		r.logger.Info("recovery scan complete", "candidates", len(seen), "enqueued", enqueued)
 	}
 	return nil
 }

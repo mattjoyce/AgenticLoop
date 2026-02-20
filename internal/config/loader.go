@@ -82,6 +82,12 @@ func applyDefaults(cfg *Config) {
 	if cfg.Agent.MaxActRounds == 0 {
 		cfg.Agent.MaxActRounds = 6
 	}
+	if cfg.Agent.QueueCapacity == 0 {
+		cfg.Agent.QueueCapacity = 100
+	}
+	if cfg.Agent.EnqueueTimeout == 0 {
+		cfg.Agent.EnqueueTimeout = 2 * time.Second
+	}
 	if cfg.Agent.WorkspaceDir == "" {
 		cfg.Agent.WorkspaceDir = "./data/workspaces"
 	}
@@ -145,6 +151,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Agent.StepTimeout <= 0 {
 		return fmt.Errorf("agent.step_timeout must be positive")
+	}
+	if cfg.Agent.QueueCapacity <= 0 {
+		return fmt.Errorf("agent.queue_capacity must be positive")
+	}
+	if cfg.Agent.EnqueueTimeout < 0 {
+		return fmt.Errorf("agent.enqueue_timeout must be >= 0")
 	}
 	return nil
 }

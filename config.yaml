@@ -26,6 +26,8 @@ agent:
   default_deadline: 5m
   step_timeout: 120s
   max_retry_per_step: 3
+  queue_capacity: 100
+  enqueue_timeout: 2s
   workspace_dir: "./data/workspaces"
   prompts:
     frame: |

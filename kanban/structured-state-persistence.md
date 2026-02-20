@@ -1,12 +1,12 @@
 ---
-id: 106
+id: 115
 status: backlog
 priority: Medium
 blocked_by: []
 tags: [agent, loop, state, workspace, prompts]
 ---
 
-# #106: Structured State Persistence Across Loop Iterations
+# #115: Structured State Persistence Across Loop Iterations
 
 Persist FRAME's JSON state object to `state.json` in the workspace and thread it
 through all stages so later loops can mutate the shared todo list and evidence
@@ -77,3 +77,4 @@ tick off todo items and cite evidence paths without re-reading the entire memory
 - 2026-02-20: Created from prompt engineering session. FRAME/PLAN/ACT/REFLECT
   prompts upgraded to v2 with JSON output contracts. State persistence identified
   as the key missing runtime affordance to make structured todo tracking work.
+- 2026-02-20: Renumbered from `#106` to `#115` to resolve duplicate kanban ID collision. (by @assistant)

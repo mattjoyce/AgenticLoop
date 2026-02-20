@@ -3,8 +3,10 @@ package localtools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +42,14 @@ func TestSanitizePath(t *testing.T) {
 				t.Fatalf("expected absolute path, got %q", got)
 			}
 		})
+	}
+
+	// Prefix-collision escape: /tmp/base_evil starts with /tmp/base as a string,
+	// but it is outside the workspace and must be rejected.
+	siblingName := filepath.Base(base) + "_evil"
+	prefixCollision := filepath.Join("..", siblingName, "file.txt")
+	if _, err := sanitizePath(base, prefixCollision); err == nil {
+		t.Fatalf("expected prefix-collision path %q to be rejected", prefixCollision)
 	}
 }
 
@@ -506,6 +516,49 @@ func TestWorkspacePathEscape(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSymlinkEscapeRejected(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+
+	seedPath := filepath.Join(outside, "seed.txt")
+	if err := os.WriteFile(seedPath, []byte("seed"), 0o644); err != nil {
+		t.Fatalf("seed outside file: %v", err)
+	}
+
+	linkPath := filepath.Join(base, "linkout")
+	if err := os.Symlink(outside, linkPath); err != nil {
+		t.Skipf("symlink setup unsupported on this environment: %v", err)
+	}
+
+	tools := BuildWorkspaceTools(base)
+	ctx := context.Background()
+
+	for _, tt := range tools {
+		args := symlinkEscapeArgs(tt.name)
+		payload, err := json.Marshal(args)
+		if err != nil {
+			t.Fatalf("%s: marshal args: %v", tt.name, err)
+		}
+
+		out, err := tt.InvokableRun(ctx, string(payload))
+		if err != nil {
+			t.Fatalf("%s: unexpected Go error: %v", tt.name, err)
+		}
+
+		var resp map[string]any
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			t.Fatalf("%s: decode response: %v", tt.name, err)
+		}
+		if resp["status"] != "error" {
+			t.Fatalf("%s: expected error response, got %v", tt.name, resp)
+		}
+		errText := fmt.Sprint(resp["error"])
+		if !strings.Contains(errText, "escapes workspace directory") {
+			t.Fatalf("%s: expected workspace escape error, got %q", tt.name, errText)
+		}
+	}
+}
+
 func TestWorkspaceObserver(t *testing.T) {
 	base := t.TempDir()
 	tools := BuildWorkspaceTools(base)
@@ -544,4 +597,30 @@ func findWorkspaceTool(t *testing.T, tools []*WorkspaceFileTool, name string) *W
 	}
 	t.Fatalf("tool %q not found", name)
 	return nil
+}
+
+func symlinkEscapeArgs(toolName string) map[string]any {
+	switch toolName {
+	case "workspace_write":
+		return map[string]any{"path": "linkout/new.txt", "content": "x"}
+	case "workspace_read":
+		return map[string]any{"path": "linkout/seed.txt"}
+	case "workspace_list":
+		return map[string]any{"path": "linkout"}
+	case "workspace_append":
+		return map[string]any{"path": "linkout/new.txt", "content": "x"}
+	case "workspace_edit":
+		return map[string]any{
+			"path":    "linkout/seed.txt",
+			"mode":    "regex_replace",
+			"search":  "seed",
+			"replace": "x",
+		}
+	case "workspace_delete":
+		return map[string]any{"path": "linkout/seed.txt"}
+	case "workspace_mkdir":
+		return map[string]any{"path": "linkout/newdir"}
+	default:
+		return map[string]any{"path": "linkout"}
+	}
 }

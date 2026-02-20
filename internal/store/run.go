@@ -53,14 +53,6 @@ func (s *RunStore) DB() *sql.DB {
 
 // Create inserts a new run. If wakeID is non-nil and already exists, returns the existing run.
 func (s *RunStore) Create(ctx context.Context, goal string, wakeID *string, runCtx json.RawMessage, constraints json.RawMessage) (*Run, bool, error) {
-	// Check for existing wake_id (idempotency)
-	if wakeID != nil {
-		existing, err := s.GetByWakeID(ctx, *wakeID)
-		if err == nil && existing != nil {
-			return existing, true, nil
-		}
-	}
-
 	now := time.Now().UTC()
 	run := &Run{
 		ID:          uuid.New().String(),
@@ -73,14 +65,32 @@ func (s *RunStore) Create(ctx context.Context, goal string, wakeID *string, runC
 		CreatedAt:   now,
 	}
 
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO runs (id, wake_id, goal, context, constraints, status, updated_at, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	insertSQL := `INSERT INTO runs (id, wake_id, goal, context, constraints, status, updated_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	if wakeID != nil {
+		insertSQL += ` ON CONFLICT(wake_id) DO NOTHING`
+	}
+
+	res, err := s.db.ExecContext(ctx, insertSQL,
 		run.ID, run.WakeID, run.Goal, run.Context, run.Constraints,
 		string(run.Status), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("insert run: %w", err)
+	}
+
+	if wakeID != nil {
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return nil, false, fmt.Errorf("insert run: rows affected: %w", err)
+		}
+		if rows == 0 {
+			existing, err := s.GetByWakeID(ctx, *wakeID)
+			if err != nil {
+				return nil, false, fmt.Errorf("get existing run by wake_id after conflict: %w", err)
+			}
+			return existing, true, nil
+		}
 	}
 
 	return run, false, nil
@@ -140,7 +150,6 @@ func (s *RunStore) UpdateStatus(ctx context.Context, id string, status RunStatus
 	}
 	return nil
 }
-
 
 func (s *RunStore) scanOne(ctx context.Context, query string, args ...any) (*Run, error) {
 	row := s.db.QueryRowContext(ctx, query, args...)

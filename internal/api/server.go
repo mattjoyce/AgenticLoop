@@ -17,7 +17,7 @@ import (
 type RunCreator interface {
 	Create(ctx context.Context, goal string, wakeID *string, runCtx json.RawMessage, constraints json.RawMessage) (*store.Run, bool, error)
 	GetByID(ctx context.Context, id string) (*store.Run, error)
-	Enqueue(runID string)
+	Enqueue(runID string) error
 }
 
 // Config holds API server configuration.

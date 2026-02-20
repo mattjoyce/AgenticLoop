@@ -83,8 +83,14 @@ func (s *Server) handleWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !existing {
-		s.creator.Enqueue(run.ID)
+	// Always try to enqueue queued runs. This allows retries to re-enqueue a run
+	// if an earlier wake created it but enqueueing failed due backpressure.
+	if run.Status == store.RunStatusQueued {
+		if err := s.creator.Enqueue(run.ID); err != nil {
+			s.logger.Warn("failed to enqueue run", "run_id", run.ID, "existing", existing, "error", err)
+			s.writeError(w, http.StatusServiceUnavailable, "runner queue is full; retry later")
+			return
+		}
 	}
 
 	s.logger.Info("wake request processed",

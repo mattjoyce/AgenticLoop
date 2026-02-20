@@ -55,6 +55,8 @@ type AgentConfig struct {
 	StepTimeout     time.Duration `yaml:"step_timeout"`
 	MaxRetryPerStep int           `yaml:"max_retry_per_step"`
 	MaxActRounds    int           `yaml:"max_act_rounds"`
+	QueueCapacity   int           `yaml:"queue_capacity"`
+	EnqueueTimeout  time.Duration `yaml:"enqueue_timeout"`
 	WorkspaceDir    string        `yaml:"workspace_dir"`
 	SaveLoopMemory  bool          `yaml:"save_loop_memory"`
 	Prompts         AgentPrompts  `yaml:"prompts"`

@@ -26,7 +26,7 @@ POST /v1/wake  →  Runner (serial queue)  →  Loop (Frame/Plan/Act/Reflect)
 - **Pluggable LLM**: Anthropic Claude, OpenAI, or Ollama via the [Eino](https://github.com/cloudwego/eino) framework
 - **Completion gate**: Agent must call `report_success` before it can mark itself done
 - **Idempotency**: Optional `wake_id` prevents duplicate runs
-- **Graceful recovery**: Interrupted runs are re-queued on restart
+- **Graceful recovery**: `queued` and `running` runs are re-queued on restart
 
 ## Requirements
 
@@ -68,6 +68,8 @@ agent:
   step_timeout: 120s
   max_retry_per_step: 3
   max_act_rounds: 6
+  queue_capacity: 100
+  enqueue_timeout: 2s
   workspace_dir: ./data/workspaces
   save_loop_memory: false   # set true to archive loop_memory_iter_{N}.md each iteration
 ```
@@ -115,6 +117,9 @@ Response:
 ```json
 { "run_id": "abc123", "status": "queued", "existing": false }
 ```
+
+If the internal runner queue is saturated, wake returns `503 Service Unavailable`
+with `{ "error": "runner queue is full; retry later" }`.
 
 ### GET /v1/runs/{run_id}
 

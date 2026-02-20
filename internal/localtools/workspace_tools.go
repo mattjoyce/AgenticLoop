@@ -67,12 +67,75 @@ func sanitizePath(baseDir, relPath string) (string, error) {
 	if filepath.IsAbs(relPath) {
 		return "", fmt.Errorf("absolute paths are not allowed")
 	}
-	joined := filepath.Join(baseDir, relPath)
-	cleaned := filepath.Clean(joined)
-	if !strings.HasPrefix(cleaned, filepath.Clean(baseDir)) {
+
+	baseAbs, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace base path: %w", err)
+	}
+	baseAbs = filepath.Clean(baseAbs)
+
+	cleaned := filepath.Clean(filepath.Join(baseAbs, relPath))
+	if !pathWithinBase(baseAbs, cleaned) {
 		return "", fmt.Errorf("path escapes workspace directory")
 	}
-	return cleaned, nil
+
+	baseResolved := baseAbs
+	if resolved, err := filepath.EvalSymlinks(baseAbs); err == nil {
+		baseResolved = filepath.Clean(resolved)
+	}
+
+	relToBase, err := filepath.Rel(baseAbs, cleaned)
+	if err != nil {
+		return "", fmt.Errorf("compute relative path: %w", err)
+	}
+
+	current := baseResolved
+	for _, part := range strings.Split(relToBase, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+
+		next := filepath.Join(current, part)
+		info, err := os.Lstat(next)
+		if err != nil {
+			if os.IsNotExist(err) {
+				current = next
+				continue
+			}
+			return "", fmt.Errorf("inspect path component: %w", err)
+		}
+
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(next)
+			if err != nil {
+				return "", fmt.Errorf("resolve symlink: %w", err)
+			}
+			resolved = filepath.Clean(resolved)
+			if !pathWithinBase(baseResolved, resolved) {
+				return "", fmt.Errorf("path escapes workspace directory via symlink")
+			}
+			current = resolved
+			continue
+		}
+
+		current = next
+	}
+
+	if !pathWithinBase(baseResolved, current) {
+		return "", fmt.Errorf("path escapes workspace directory")
+	}
+	return current, nil
+}
+
+func pathWithinBase(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 // BuildWorkspaceTools returns all workspace file tools sandboxed to baseDir.
