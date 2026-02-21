@@ -261,11 +261,11 @@ Phase 4: Operator UX
 
 - [ ] Ductile scheduled wake job succeeds on `accepted=true` only.
 - [x] Sibling returns deterministic `run_id` for duplicate `wake_id`.
-- [ ] Sibling can execute at least two Ductile tool calls in one run.
+- [x] Sibling can execute at least two Ductile tool calls in one run.
 - [x] Run status is queryable independently of wake job status.
 - [ ] Token scopes enforce least privilege for sibling tool calls.
-- [ ] Restarting sibling does not lose active run progress.
-- [ ] Clear docs distinguish wake acceptance from run completion.
+- [x] Restarting sibling does not lose active run progress.
+- [x] Clear docs distinguish wake acceptance from run completion.
 - [ ] #103 and #104 branches remain unmerged.
 
 ## Narrative
@@ -275,3 +275,4 @@ Phase 4: Operator UX
 - 2026-02-20: Marked blocked by `#108`, `#109`, and `#111` because concurrency-safe wake idempotency and restart/failure-state reliability are prerequisites for calling the external sibling design production-ready. (by @assistant)
 - 2026-02-20: Cleared blockers after completing and archiving `#108`, `#109`, and `#111`; card remains in progress for remaining external-sibling acceptance criteria not covered by those reliability fixes. (by @assistant)
 - 2026-02-20: Completed additional supporting cards (`#112`, `#113`, `#114`, `#115`) to stabilize prompt/runtime alignment, operational tunability, and structured cross-loop state. Remaining gaps on this umbrella card are primarily Ductile-side security scope policy and explicit end-to-end validation of multi-tool runs under the external-sibling contract. (by @assistant)
+- 2026-02-20: Added deterministic unit coverage showing one ACT stage can execute two Ductile tool calls in a single run path using an HTTP-stubbed Ductile API. Also completed restart recovery hardening and updated docs/config to clearly separate wake acceptance from run completion semantics. Card remains open for Ductile-side token-scope enforcement and scheduler-contract validation. (by @assistant)
