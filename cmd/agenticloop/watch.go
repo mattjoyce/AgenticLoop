@@ -142,6 +142,9 @@ type watchModel struct {
 	toolTokenTotals map[string]toolTokenUsage
 	workspace       workspaceSummary
 	workspaceErr    string
+	iteration       int
+	currentPhase    string
+	reflectChoice   string // "plan" | "act" | "done" | ""
 }
 
 func newWatchModel(cfg watchConfig) watchModel {
@@ -196,6 +199,9 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toolTokenTotals = map[string]toolTokenUsage{}
 		m.workspace = workspaceSummary{}
 		m.workspaceErr = ""
+		m.iteration = 0
+		m.currentPhase = ""
+		m.reflectChoice = ""
 		m.appendEvent(fmt.Sprintf("[%s] found run %s", time.Now().Format("15:04:05"), msg.RunID))
 		return m, tea.Batch(
 			startEventStreamCmd(m.cfg, m.streamEvents),
@@ -307,7 +313,9 @@ func (m watchModel) View() string {
 	tokenPanel := renderPanel("Token Usage", m.tokenPanelLines(tokensHeight-1), panelWidth, tokensHeight, accent, true)
 	workspacePanel := renderPanel("Workspace", m.workspacePanelLines(workspaceHeight-1), panelWidth, workspaceHeight, accent, true)
 
-	return strings.Join([]string{title + " " + status, meta, eventsPanel, tokenPanel, workspacePanel, footer}, "\n")
+	phaseBar := renderPhaseBar(m.currentPhase, m.reflectChoice, m.iteration, m.waitingForRun)
+
+	return strings.Join([]string{title + " " + status, meta, phaseBar, eventsPanel, tokenPanel, workspacePanel, footer}, "\n")
 }
 
 func panelHeights(terminalHeight int) (events, tokens, workspace int) {
@@ -431,6 +439,30 @@ func (m *watchModel) handleEvent(event string, data []byte) {
 			return
 		}
 		parsed := parseStepOutput(payload.Step.ToolOutput)
+		m.currentPhase = payload.Step.Phase
+		if payload.Step.Phase == "frame" {
+			m.iteration++
+			m.reflectChoice = ""
+		}
+		// Parse reflect output to determine next_stage decision.
+		if payload.Step.Phase == "reflect" && parsed.Content != "" {
+			var reflectOut struct {
+				NextStage string `json:"next_stage"`
+				Done      bool   `json:"done"` // legacy fallback
+			}
+			if err := json.Unmarshal([]byte(parsed.Content), &reflectOut); err == nil {
+				switch reflectOut.NextStage {
+				case "plan", "act", "done":
+					m.reflectChoice = reflectOut.NextStage
+				default:
+					if reflectOut.Done {
+						m.reflectChoice = "done"
+					} else {
+						m.reflectChoice = "plan"
+					}
+				}
+			}
+		}
 		line := fmt.Sprintf("[%s] %s #%d %s status=%s",
 			time.Now().Format("15:04:05"),
 			event,
@@ -844,6 +876,51 @@ func parseToolOutput(content string) (tools []string, paths []string) {
 		}
 	}
 	return
+}
+
+func renderPhaseBar(current, reflectChoice string, iteration int, waiting bool) string {
+	phases := []string{"frame", "plan", "act", "reflect"}
+
+	activeStyle := lipgloss.NewStyle().Bold(true).
+		Foreground(lipgloss.Color("#0B1B36")).
+		Background(lipgloss.Color("#60A5FA")).
+		Padding(0, 1)
+	inactiveStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#4B6080")).
+		Padding(0, 1)
+	arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B6080"))
+	choiceStyle := lipgloss.NewStyle().Bold(true)
+
+	var parts []string
+	for i, p := range phases {
+		if i > 0 {
+			parts = append(parts, arrowStyle.Render("→"))
+		}
+		if p == current && !waiting {
+			parts = append(parts, activeStyle.Render(strings.ToUpper(p)))
+		} else {
+			parts = append(parts, inactiveStyle.Render(strings.ToUpper(p)))
+		}
+	}
+
+	// Reflect decision suffix
+	switch reflectChoice {
+	case "plan":
+		parts = append(parts, arrowStyle.Render("→"), choiceStyle.Foreground(lipgloss.Color("#FF9F43")).Render("PLAN"))
+	case "act":
+		parts = append(parts, arrowStyle.Render("→"), choiceStyle.Foreground(lipgloss.Color("#FB923C")).Render("ACT"))
+	case "done":
+		parts = append(parts, arrowStyle.Render("→"), choiceStyle.Foreground(lipgloss.Color("#4ADE80")).Render("SUCCESS"))
+	}
+
+	iterLabel := ""
+	if iteration > 0 {
+		iterLabel = fmt.Sprintf("  iter=%d", iteration)
+	}
+
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("#A8C7FF")).Render(
+		strings.Join(parts, " ") + iterLabel,
+	)
 }
 
 func connectionLabel(connected, done bool, err error) string {
