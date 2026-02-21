@@ -340,7 +340,7 @@ func (l *Loop) buildToolset(ctx context.Context, tools []tool.BaseTool) (*prepar
 	return &preparedToolset{model: toolModel, byName: byName, infos: infos}, nil
 }
 
-func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (string, int, error) {
+func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (string, int, tokenUsage, error) {
 	if l.cfg.StepTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, l.cfg.StepTimeout)
@@ -353,6 +353,7 @@ func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (
 	var resp *schema.Message
 	var err error
 	attempts := 0
+	usage := tokenUsage{}
 	maxRetries := l.cfg.MaxRetryPerStep
 	if maxRetries <= 0 {
 		maxRetries = 1
@@ -361,6 +362,7 @@ func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (
 		attempts = attempt + 1
 		resp, err = l.chatModel.Generate(ctx, msgs)
 		if err == nil {
+			usage.add(tokenUsageFromMessage(resp))
 			break
 		}
 		if attempt < maxRetries-1 {
@@ -368,15 +370,15 @@ func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (
 			l.logger.Warn("text stage LLM error, retrying", "attempt", attempt+1, "backoff", backoff, "error", err)
 			select {
 			case <-ctx.Done():
-				return "", attempts, ctx.Err()
+				return "", attempts, usage, ctx.Err()
 			case <-time.After(backoff):
 			}
 		}
 	}
 	if err != nil {
-		return "", attempts, err
+		return "", attempts, usage, err
 	}
-	return strings.TrimSpace(resp.Content), attempts, nil
+	return strings.TrimSpace(resp.Content), attempts, usage, nil
 }
 
 type actStageResult struct {
@@ -384,6 +386,8 @@ type actStageResult struct {
 	SuccessReported bool
 	ReportedSummary string
 	Attempts        int
+	TokenUsage      tokenUsage
+	ToolTokenUsage  map[string]toolTokenUsage
 }
 
 func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt string) (actStageResult, error) {
@@ -431,6 +435,8 @@ func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt
 		if genErr != nil {
 			return result, genErr
 		}
+		roundUsage := tokenUsageFromMessage(resp)
+		result.TokenUsage.add(roundUsage)
 		messages = append(messages, resp)
 
 		if len(resp.ToolCalls) == 0 {
@@ -449,10 +455,19 @@ func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt
 			return result, nil
 		}
 
-		for _, tc := range resp.ToolCalls {
+		for i, tc := range resp.ToolCalls {
 			toolSeq++
 			name := tc.Function.Name
 			arguments := normalizeJSON(tc.Function.Arguments)
+			if name != "" {
+				if result.ToolTokenUsage == nil {
+					result.ToolTokenUsage = map[string]toolTokenUsage{}
+				}
+				stat := result.ToolTokenUsage[name]
+				stat.Calls++
+				stat.add(splitTokenUsage(roundUsage, len(resp.ToolCalls), i))
+				result.ToolTokenUsage[name] = stat
+			}
 
 			inv, ok := toolset.byName[name]
 			if !ok {
@@ -494,7 +509,7 @@ func (l *Loop) runTextStageStep(ctx context.Context, runID string, stepNum *int,
 		return "", fmt.Errorf("mark step running: %w", err)
 	}
 
-	out, attempts, stageErr := l.runTextStage(ctx, prompt, userDirective)
+	out, attempts, usage, stageErr := l.runTextStage(ctx, prompt, userDirective)
 	if attempts <= 0 {
 		attempts = 1
 	}
@@ -504,7 +519,11 @@ func (l *Loop) runTextStageStep(ctx context.Context, runID string, stepNum *int,
 		return "", stageErr
 	}
 
-	outJSON := mustJSON(map[string]string{"content": out})
+	outPayload := map[string]any{"content": out}
+	if !usage.isZero() {
+		outPayload["token_usage"] = usage
+	}
+	outJSON := mustJSON(outPayload)
 	if err := l.stepStore.UpdateStatusWithAttempt(ctx, step.ID, store.StepStatusOK, outJSON, nil, attempts); err != nil {
 		return "", fmt.Errorf("mark step ok: %w", err)
 	}
@@ -532,7 +551,15 @@ func (l *Loop) runActStageStep(ctx context.Context, runID string, stepNum *int, 
 		return result, stageErr
 	}
 
-	outJSON := mustJSON(map[string]string{"content": result.Summary})
+	outPayload := map[string]any{"content": result.Summary}
+	if !result.TokenUsage.isZero() {
+		outPayload["token_usage"] = result.TokenUsage
+	}
+	if len(result.ToolTokenUsage) > 0 {
+		outPayload["tool_token_usage"] = result.ToolTokenUsage
+		outPayload["tool_token_usage_estimated"] = true
+	}
+	outJSON := mustJSON(outPayload)
 	if err := l.stepStore.UpdateStatusWithAttempt(ctx, step.ID, store.StepStatusOK, outJSON, nil, attempts); err != nil {
 		return actStageResult{}, fmt.Errorf("mark act step ok: %w", err)
 	}
@@ -646,6 +673,69 @@ func normalizeJSON(s string) json.RawMessage {
 func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+type tokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+func tokenUsageFromMessage(msg *schema.Message) tokenUsage {
+	if msg == nil || msg.ResponseMeta == nil || msg.ResponseMeta.Usage == nil {
+		return tokenUsage{}
+	}
+	return tokenUsage{
+		PromptTokens:     msg.ResponseMeta.Usage.PromptTokens,
+		CompletionTokens: msg.ResponseMeta.Usage.CompletionTokens,
+		TotalTokens:      msg.ResponseMeta.Usage.TotalTokens,
+	}
+}
+
+func (u *tokenUsage) add(other tokenUsage) {
+	u.PromptTokens += other.PromptTokens
+	u.CompletionTokens += other.CompletionTokens
+	u.TotalTokens += other.TotalTokens
+}
+
+func (u tokenUsage) isZero() bool {
+	return u.PromptTokens == 0 && u.CompletionTokens == 0 && u.TotalTokens == 0
+}
+
+type toolTokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	Calls            int `json:"calls"`
+}
+
+func (u *toolTokenUsage) add(other tokenUsage) {
+	u.PromptTokens += other.PromptTokens
+	u.CompletionTokens += other.CompletionTokens
+	u.TotalTokens += other.TotalTokens
+}
+
+func splitTokenUsage(u tokenUsage, parts, idx int) tokenUsage {
+	if parts <= 0 {
+		return tokenUsage{}
+	}
+	return tokenUsage{
+		PromptTokens:     splitIntEvenly(u.PromptTokens, parts, idx),
+		CompletionTokens: splitIntEvenly(u.CompletionTokens, parts, idx),
+		TotalTokens:      splitIntEvenly(u.TotalTokens, parts, idx),
+	}
+}
+
+func splitIntEvenly(total, parts, idx int) int {
+	if parts <= 0 {
+		return 0
+	}
+	base := total / parts
+	rem := total % parts
+	if idx >= 0 && idx < rem {
+		return base + 1
+	}
+	return base
 }
 
 func toolCallID(tc schema.ToolCall, toolName string, idx int) string {

@@ -92,9 +92,14 @@ export DUCTILE_TOOL_TOKEN=...        # only needed if using Ductile tools
 go build ./cmd/agenticloop
 ./agenticloop start --config config.yaml
 
-# Watch a live run stream (blue/orange TUI)
+# Watch a live run stream (orange-highlight TUI)
 ./agenticloop watch --api http://127.0.0.1:8090 --token "$AGENTICLOOP_API_TOKEN" --poll-interval 2s <run_id>
 ```
+
+`watch` now includes:
+- Event stream panel
+- Token usage panel (`job total` + per-tool ACT usage accumulator)
+- Workspace panel (file list, per-file size, total workspace size)
 
 ## API
 
@@ -128,6 +133,10 @@ with `{ "error": "runner queue is full; retry later" }`.
 ### GET /v1/runs/{run_id}
 
 Fetch the full run status and step history.
+
+### GET /v1/runs/{run_id}/workspace
+
+Fetch the run workspace inventory (relative file paths + sizes + total size).
 
 ### GET /v1/runs/{run_id}/events
 

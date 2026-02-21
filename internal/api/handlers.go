@@ -5,7 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,6 +46,18 @@ type RunResponse struct {
 	StartedAt   *time.Time      `json:"started_at,omitempty"`
 	CompletedAt *time.Time      `json:"completed_at,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
+}
+
+type WorkspaceFileResponse struct {
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+type WorkspaceResponse struct {
+	RunID          string                  `json:"run_id"`
+	FileCount      int                     `json:"file_count"`
+	TotalSizeBytes int64                   `json:"total_size_bytes"`
+	Files          []WorkspaceFileResponse `json:"files"`
 }
 
 // HealthzResponse is returned by GET /healthz.
@@ -172,6 +188,99 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		StartedAt:   run.StartedAt,
 		CompletedAt: run.CompletedAt,
 		CreatedAt:   run.CreatedAt,
+	})
+}
+
+func (s *Server) handleRunWorkspace(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "run_id")
+	if runID == "" {
+		s.writeError(w, http.StatusBadRequest, "run_id is required")
+		return
+	}
+
+	if _, err := s.runs.GetByID(r.Context(), runID); err != nil {
+		s.writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+
+	baseDir := strings.TrimSpace(s.config.WorkspaceDir)
+	if baseDir == "" {
+		s.writeError(w, http.StatusServiceUnavailable, "workspace directory is not configured")
+		return
+	}
+
+	baseAbs, err := filepath.Abs(baseDir)
+	if err != nil {
+		s.logger.Error("failed to resolve workspace base path", "workspace_dir", baseDir, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "failed to resolve workspace directory")
+		return
+	}
+	runDir := filepath.Join(baseAbs, runID)
+	relToBase, err := filepath.Rel(baseAbs, runDir)
+	if err != nil || relToBase == ".." || strings.HasPrefix(relToBase, ".."+string(os.PathSeparator)) {
+		s.writeError(w, http.StatusBadRequest, "invalid run workspace path")
+		return
+	}
+
+	info, err := os.Stat(runDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			respondJSON(w, http.StatusOK, WorkspaceResponse{
+				RunID:          runID,
+				FileCount:      0,
+				TotalSizeBytes: 0,
+				Files:          []WorkspaceFileResponse{},
+			})
+			return
+		}
+		s.logger.Error("failed to stat run workspace", "run_id", runID, "path", runDir, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "failed to read workspace")
+		return
+	}
+	if !info.IsDir() {
+		s.writeError(w, http.StatusInternalServerError, "workspace path is not a directory")
+		return
+	}
+
+	files := make([]WorkspaceFileResponse, 0, 32)
+	var totalSize int64
+	if err := filepath.WalkDir(runDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		fileInfo, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(runDir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		files = append(files, WorkspaceFileResponse{
+			Path:      rel,
+			SizeBytes: fileInfo.Size(),
+		})
+		totalSize += fileInfo.Size()
+		return nil
+	}); err != nil {
+		s.logger.Error("failed to walk run workspace", "run_id", runID, "path", runDir, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "failed to read workspace files")
+		return
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
+	})
+
+	respondJSON(w, http.StatusOK, WorkspaceResponse{
+		RunID:          runID,
+		FileCount:      len(files),
+		TotalSizeBytes: totalSize,
+		Files:          files,
 	})
 }
 

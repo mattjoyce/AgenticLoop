@@ -68,6 +68,13 @@ func TestRunActStageCanExecuteTwoDuctileTools(t *testing.T) {
 		responses: []*schema.Message{
 			{
 				Role: schema.Assistant,
+				ResponseMeta: &schema.ResponseMeta{
+					Usage: &schema.TokenUsage{
+						PromptTokens:     120,
+						CompletionTokens: 40,
+						TotalTokens:      160,
+					},
+				},
 				ToolCalls: []schema.ToolCall{
 					{
 						ID:   "tc-1",
@@ -90,6 +97,13 @@ func TestRunActStageCanExecuteTwoDuctileTools(t *testing.T) {
 			{
 				Role:    schema.Assistant,
 				Content: "completed two tool calls",
+				ResponseMeta: &schema.ResponseMeta{
+					Usage: &schema.TokenUsage{
+						PromptTokens:     80,
+						CompletionTokens: 20,
+						TotalTokens:      100,
+					},
+				},
 			},
 		},
 	}
@@ -114,6 +128,23 @@ func TestRunActStageCanExecuteTwoDuctileTools(t *testing.T) {
 	}
 	if !strings.Contains(result.Summary, "completed two tool calls") {
 		t.Fatalf("unexpected act summary: %q", result.Summary)
+	}
+	if result.TokenUsage.TotalTokens != 260 {
+		t.Fatalf("expected total token usage 260, got %d", result.TokenUsage.TotalTokens)
+	}
+	alphaUsage, ok := result.ToolTokenUsage["ductile_alpha_one"]
+	if !ok {
+		t.Fatalf("missing ductile_alpha_one token usage")
+	}
+	if alphaUsage.Calls != 1 || alphaUsage.TotalTokens != 80 {
+		t.Fatalf("unexpected alpha token usage: %+v", alphaUsage)
+	}
+	betaUsage, ok := result.ToolTokenUsage["ductile_beta_two"]
+	if !ok {
+		t.Fatalf("missing ductile_beta_two token usage")
+	}
+	if betaUsage.Calls != 1 || betaUsage.TotalTokens != 80 {
+		t.Fatalf("unexpected beta token usage: %+v", betaUsage)
 	}
 }
 

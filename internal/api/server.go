@@ -24,6 +24,7 @@ type RunCreator interface {
 type Config struct {
 	Listen                  string
 	Token                   string
+	WorkspaceDir            string
 	StreamPollInterval      time.Duration
 	StreamHeartbeatInterval time.Duration
 }
@@ -102,6 +103,7 @@ func (s *Server) setupRoutes() *chi.Mux {
 		r.Post("/v1/wake", s.handleWake)
 		r.Get("/v1/runs", s.handleListRuns)
 		r.Get("/v1/runs/{run_id}", s.handleGetRun)
+		r.Get("/v1/runs/{run_id}/workspace", s.handleRunWorkspace)
 		r.Get("/v1/runs/{run_id}/events", s.handleRunEvents)
 	})
 

@@ -127,6 +127,7 @@ func runStart(args []string) error {
 	srv := api.New(api.Config{
 		Listen:                  cfg.API.Listen,
 		Token:                   cfg.API.Token,
+		WorkspaceDir:            cfg.Agent.WorkspaceDir,
 		StreamPollInterval:      cfg.API.StreamPollInterval,
 		StreamHeartbeatInterval: cfg.API.StreamHeartbeatInterval,
 	}, runStore, runner, logger)
