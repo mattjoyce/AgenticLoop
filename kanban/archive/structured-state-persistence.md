@@ -1,6 +1,6 @@
 ---
 id: 115
-status: backlog
+status: archive
 priority: Medium
 blocked_by: []
 tags: [agent, loop, state, workspace, prompts]
@@ -78,3 +78,4 @@ tick off todo items and cite evidence paths without re-reading the entire memory
   prompts upgraded to v2 with JSON output contracts. State persistence identified
   as the key missing runtime affordance to make structured todo tracking work.
 - 2026-02-20: Renumbered from `#106` to `#115` to resolve duplicate kanban ID collision. (by @assistant)
+- 2026-02-20: Implemented structured state persistence via workspace `state.json` with loop-level read/write plumbing, added `{{.State}}` to all stage templates, upgraded FRAME prompt contract to JSON state output, and added REFLECT `updated_state` merge support (todo merge by `id`, evidence/notes append-dedupe). Added unit tests for normalization/merge behavior and workspace state roundtrip. (by @assistant)

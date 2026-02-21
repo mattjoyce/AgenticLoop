@@ -22,20 +22,25 @@ func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	apiBase := fs.String("api", "http://127.0.0.1:8090", "base URL for AgenticLoop API")
 	token := fs.String("token", os.Getenv("AGENTICLOOP_API_TOKEN"), "Bearer token for API auth")
+	pollInterval := fs.Duration("poll-interval", 2*time.Second, "poll interval while waiting for a run")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return fmt.Errorf("usage: agenticloop watch [--api <url>] [--token <token>] [run_id]")
+		return fmt.Errorf("usage: agenticloop watch [--api <url>] [--token <token>] [--poll-interval <duration>] [run_id]")
 	}
 	if strings.TrimSpace(*token) == "" {
 		return fmt.Errorf("token is required (use --token or AGENTICLOOP_API_TOKEN)")
 	}
+	if *pollInterval <= 0 {
+		return fmt.Errorf("poll-interval must be positive")
+	}
 
 	cfg := watchConfig{
-		APIBase: strings.TrimRight(*apiBase, "/"),
-		Token:   *token,
-		RunID:   fs.Arg(0),
+		APIBase:      strings.TrimRight(*apiBase, "/"),
+		Token:        *token,
+		RunID:        fs.Arg(0),
+		PollInterval: *pollInterval,
 	}
 
 	p := tea.NewProgram(newWatchModel(cfg), tea.WithAltScreen())
@@ -44,9 +49,10 @@ func runWatch(args []string) error {
 }
 
 type watchConfig struct {
-	APIBase string
-	Token   string
-	RunID   string
+	APIBase      string
+	Token        string
+	RunID        string
+	PollInterval time.Duration
 }
 
 type streamEventMsg struct {
@@ -95,7 +101,7 @@ func newWatchModel(cfg watchConfig) watchModel {
 
 func (m watchModel) Init() tea.Cmd {
 	if m.waitingForRun {
-		return pollForRunCmd(m.cfg.APIBase, m.cfg.Token)
+		return pollForRunCmd(m.cfg.APIBase, m.cfg.Token, m.cfg.PollInterval)
 	}
 	return tea.Batch(
 		startEventStreamCmd(m.cfg, m.streamEvents),
@@ -116,7 +122,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case pollTickMsg:
-		return m, pollForRunCmd(m.cfg.APIBase, m.cfg.Token)
+		return m, pollForRunCmd(m.cfg.APIBase, m.cfg.Token, m.cfg.PollInterval)
 	case runFoundMsg:
 		m.cfg.RunID = msg.RunID
 		m.waitingForRun = false
@@ -346,11 +352,14 @@ func (m *watchModel) resetToWaiting() tea.Cmd {
 	m.done = false
 	m.err = nil
 	m.runStatus = "waiting"
-	return pollForRunCmd(m.cfg.APIBase, m.cfg.Token)
+	return pollForRunCmd(m.cfg.APIBase, m.cfg.Token, m.cfg.PollInterval)
 }
 
-func pollForRunCmd(apiBase, token string) tea.Cmd {
+func pollForRunCmd(apiBase, token string, pollInterval time.Duration) tea.Cmd {
 	return func() tea.Msg {
+		if pollInterval <= 0 {
+			pollInterval = 2 * time.Second
+		}
 		for _, status := range []string{"running", "queued"} {
 			req, err := http.NewRequest(http.MethodGet, apiBase+"/v1/runs?status="+status, nil)
 			if err != nil {
@@ -370,7 +379,7 @@ func pollForRunCmd(apiBase, token string) tea.Cmd {
 				return runFoundMsg{RunID: runs[0].ID}
 			}
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(pollInterval)
 		return pollTickMsg{}
 	}
 }

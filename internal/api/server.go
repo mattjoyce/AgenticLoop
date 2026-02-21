@@ -22,8 +22,10 @@ type RunCreator interface {
 
 // Config holds API server configuration.
 type Config struct {
-	Listen string
-	Token  string
+	Listen                  string
+	Token                   string
+	StreamPollInterval      time.Duration
+	StreamHeartbeatInterval time.Duration
 }
 
 // Server represents the HTTP API server.

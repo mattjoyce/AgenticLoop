@@ -89,6 +89,12 @@ func (s *StepStore) Append(ctx context.Context, runID string, stepNum int, phase
 
 // UpdateStatus updates a step's status and output.
 func (s *StepStore) UpdateStatus(ctx context.Context, id string, status StepStatus, toolOutput json.RawMessage, errMsg *string) error {
+	return s.UpdateStatusWithAttempt(ctx, id, status, toolOutput, errMsg, 0)
+}
+
+// UpdateStatusWithAttempt updates a step's status, output, and optional attempt count.
+// Pass attempt <= 0 to keep the current attempt value unchanged.
+func (s *StepStore) UpdateStatusWithAttempt(ctx context.Context, id string, status StepStatus, toolOutput json.RawMessage, errMsg *string, attempt int) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	var startedAt, completedAt *string
@@ -101,9 +107,10 @@ func (s *StepStore) UpdateStatus(ctx context.Context, id string, status StepStat
 
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE steps SET status = ?, tool_output = COALESCE(?, tool_output), error = COALESCE(?, error),
-		 started_at = COALESCE(?, started_at), completed_at = COALESCE(?, completed_at)
+		 started_at = COALESCE(?, started_at), completed_at = COALESCE(?, completed_at),
+		 attempt = CASE WHEN ? > 0 THEN ? ELSE attempt END
 		 WHERE id = ?`,
-		string(status), toolOutput, errMsg, startedAt, completedAt, id,
+		string(status), toolOutput, errMsg, startedAt, completedAt, attempt, attempt, id,
 	)
 	if err != nil {
 		return fmt.Errorf("update step status: %w", err)

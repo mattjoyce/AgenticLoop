@@ -28,8 +28,10 @@ type DatabaseConfig struct {
 
 // APIConfig defines HTTP API server settings.
 type APIConfig struct {
-	Listen string `yaml:"listen"`
-	Token  string `yaml:"token"`
+	Listen                  string        `yaml:"listen"`
+	Token                   string        `yaml:"token"`
+	StreamPollInterval      time.Duration `yaml:"stream_poll_interval"`
+	StreamHeartbeatInterval time.Duration `yaml:"stream_heartbeat_interval"`
 }
 
 // DuctileConfig defines the connection to the Ductile gateway.
@@ -42,10 +44,11 @@ type DuctileConfig struct {
 
 // LLMConfig defines the LLM provider settings.
 type LLMConfig struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-	APIKey   string `yaml:"api_key"`
-	BaseURL  string `yaml:"base_url,omitempty"`
+	Provider  string `yaml:"provider"`
+	Model     string `yaml:"model"`
+	APIKey    string `yaml:"api_key"`
+	BaseURL   string `yaml:"base_url,omitempty"`
+	MaxTokens int    `yaml:"max_tokens,omitempty"`
 }
 
 // AgentConfig defines default agent behavior.

@@ -228,8 +228,17 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pollTicker := time.NewTicker(700 * time.Millisecond)
-	heartbeatTicker := time.NewTicker(15 * time.Second)
+	pollInterval := s.config.StreamPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 700 * time.Millisecond
+	}
+	heartbeatInterval := s.config.StreamHeartbeatInterval
+	if heartbeatInterval <= 0 {
+		heartbeatInterval = 15 * time.Second
+	}
+
+	pollTicker := time.NewTicker(pollInterval)
+	heartbeatTicker := time.NewTicker(heartbeatInterval)
 	defer pollTicker.Stop()
 	defer heartbeatTicker.Stop()
 

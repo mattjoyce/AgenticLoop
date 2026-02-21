@@ -94,6 +94,9 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 		if memory := ws.ReadRunMemory(); memory != "" {
 			state.Memory = clipText(memory, 12000)
 		}
+		if savedState := ws.ReadState(); savedState != "" {
+			state.State = clipText(savedState, 12000)
+		}
 		if err := ws.WritePromptSnapshot(run.Goal, run.Context, run.Constraints, "staged-prompts: frame, plan, act, reflect"); err != nil {
 			l.logger.Error("failed to write prompt snapshot", "run_id", run.ID, "error", err)
 		}
@@ -121,6 +124,7 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 		state.Iteration = iter
 		if ws != nil {
 			state.Memory = clipText(ws.ReadRunMemory(), 12000)
+			state.State = clipText(ws.ReadState(), 12000)
 			if l.cfg.SaveLoopMemory && iter > 1 {
 				if err := ws.ArchiveLoopMemory(iter - 1); err != nil {
 					l.logger.Error("failed to archive loop memory", "run_id", run.ID, "iteration", iter-1, "error", err)
@@ -138,13 +142,18 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 			if ws != nil {
 				_ = ws.AppendStagePrompt(iter, "frame", framePrompt)
 			}
-			frameOut, err := l.runTextStage(ctx, framePrompt, "Produce the frame now.")
+			frameOut, err := l.runTextStageStep(ctx, run.ID, &stepNum, store.StepPhaseFrame, framePrompt, "Produce the frame now.")
 			if err != nil {
 				return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("frame stage: %w", err))
 			}
 			state.Frame = frameOut
-			if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseFrame, frameOut); err != nil {
-				l.logger.Error("failed to persist frame step", "run_id", run.ID, "error", err)
+			if ws != nil {
+				statePayload := normalizeStateJSON(frameOut)
+				if err := ws.WriteState(statePayload); err != nil {
+					l.logger.Error("failed to write frame state", "run_id", run.ID, "iteration", iter, "error", err)
+				} else {
+					state.State = clipText(string(statePayload), 12000)
+				}
 			}
 		}
 
@@ -153,21 +162,18 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 			if ws != nil {
 				_ = ws.AppendStagePrompt(iter, "plan", planPrompt)
 			}
-			planOut, err := l.runTextStage(ctx, planPrompt, "Produce the plan now.")
+			planOut, err := l.runTextStageStep(ctx, run.ID, &stepNum, store.StepPhasePlan, planPrompt, "Produce the plan now.")
 			if err != nil {
 				return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("plan stage: %w", err))
 			}
 			state.Plan = planOut
-			if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhasePlan, planOut); err != nil {
-				l.logger.Error("failed to persist plan step", "run_id", run.ID, "error", err)
-			}
 		}
 
 		actPrompt := l.renderPrompt(l.cfg.Prompts.Act, state)
 		if ws != nil {
 			_ = ws.AppendStagePrompt(iter, "act", actPrompt)
 		}
-		actResult, err := l.runActStage(ctx, toolset, actPrompt)
+		actResult, err := l.runActStageStep(ctx, run.ID, &stepNum, toolset, actPrompt)
 		if err != nil {
 			return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("act stage: %w", err))
 		}
@@ -181,24 +187,29 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 		if ws != nil {
 			state.LoopMemory = clipText(ws.ReadLoopMemory(), 12000)
 		}
-		if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseAct, actResult.Summary); err != nil {
-			l.logger.Error("failed to persist act summary step", "run_id", run.ID, "error", err)
-		}
 
 		reflectPrompt := l.renderPrompt(l.cfg.Prompts.Reflect, state)
 		if ws != nil {
 			_ = ws.AppendStagePrompt(iter, "reflect", reflectPrompt)
 		}
-		reflectOut, err := l.runTextStage(ctx, reflectPrompt, "Return reflection JSON now.")
+		reflectOut, err := l.runTextStageStep(ctx, run.ID, &stepNum, store.StepPhaseReflect, reflectPrompt, "Return reflection JSON now.")
 		if err != nil {
 			return l.failRun(ctx, callbackURL, run.ID, fmt.Errorf("reflect stage: %w", err))
-		}
-		if err := l.appendTextStep(ctx, run.ID, &stepNum, store.StepPhaseReflect, reflectOut); err != nil {
-			l.logger.Error("failed to persist reflect step", "run_id", run.ID, "error", err)
 		}
 
 		decision := parseReflectDecision(reflectOut)
 		if ws != nil {
+			if len(decision.UpdatedState) > 0 {
+				mergedState, err := mergeStateJSON(json.RawMessage(ws.ReadState()), decision.UpdatedState)
+				if err != nil {
+					l.logger.Error("failed to merge updated_state into state.json", "run_id", run.ID, "iteration", iter, "error", err)
+				} else if err := ws.WriteState(mergedState); err != nil {
+					l.logger.Error("failed to persist merged state.json", "run_id", run.ID, "iteration", iter, "error", err)
+				} else {
+					state.State = clipText(string(mergedState), 12000)
+				}
+			}
+
 			memoryUpdate := strings.TrimSpace(decision.MemoryUpdate)
 			if memoryUpdate == "" {
 				memoryUpdate = strings.TrimSpace(decision.NextFocus)
@@ -264,6 +275,7 @@ type stageState struct {
 	Context         string
 	Constraints     string
 	Memory          string
+	State           string
 	LoopMemory      string
 	Frame           string
 	Plan            string
@@ -277,11 +289,12 @@ type stageState struct {
 }
 
 type reflectDecision struct {
-	NextStage    string `json:"next_stage"` // "plan" | "act" | "done"
-	Done         bool   `json:"done"`       // legacy fallback
-	Summary      string `json:"summary"`
-	NextFocus    string `json:"next_focus"`
-	MemoryUpdate string `json:"memory_update"`
+	NextStage    string          `json:"next_stage"` // "plan" | "act" | "done"
+	Done         bool            `json:"done"`       // legacy fallback
+	Summary      string          `json:"summary"`
+	NextFocus    string          `json:"next_focus"`
+	MemoryUpdate string          `json:"memory_update"`
+	UpdatedState json.RawMessage `json:"updated_state"`
 }
 
 func (d reflectDecision) resolvedNextStage() string {
@@ -327,7 +340,7 @@ func (l *Loop) buildToolset(ctx context.Context, tools []tool.BaseTool) (*prepar
 	return &preparedToolset{model: toolModel, byName: byName, infos: infos}, nil
 }
 
-func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (string, error) {
+func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (string, int, error) {
 	if l.cfg.StepTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, l.cfg.StepTimeout)
@@ -339,11 +352,13 @@ func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (
 	}
 	var resp *schema.Message
 	var err error
+	attempts := 0
 	maxRetries := l.cfg.MaxRetryPerStep
 	if maxRetries <= 0 {
 		maxRetries = 1
 	}
 	for attempt := 0; attempt < maxRetries; attempt++ {
+		attempts = attempt + 1
 		resp, err = l.chatModel.Generate(ctx, msgs)
 		if err == nil {
 			break
@@ -353,21 +368,22 @@ func (l *Loop) runTextStage(ctx context.Context, prompt, userDirective string) (
 			l.logger.Warn("text stage LLM error, retrying", "attempt", attempt+1, "backoff", backoff, "error", err)
 			select {
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return "", attempts, ctx.Err()
 			case <-time.After(backoff):
 			}
 		}
 	}
 	if err != nil {
-		return "", err
+		return "", attempts, err
 	}
-	return strings.TrimSpace(resp.Content), nil
+	return strings.TrimSpace(resp.Content), attempts, nil
 }
 
 type actStageResult struct {
 	Summary         string
 	SuccessReported bool
 	ReportedSummary string
+	Attempts        int
 }
 
 func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt string) (actStageResult, error) {
@@ -397,6 +413,7 @@ func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt
 			maxRetries = 1
 		}
 		for attempt := 0; attempt < maxRetries; attempt++ {
+			result.Attempts++
 			resp, genErr = toolset.model.Generate(ctx, messages)
 			if genErr == nil {
 				break
@@ -467,14 +484,72 @@ func (l *Loop) runActStage(ctx context.Context, toolset *preparedToolset, prompt
 	return result, nil
 }
 
+func (l *Loop) runTextStageStep(ctx context.Context, runID string, stepNum *int, phase store.StepPhase, prompt, userDirective string) (string, error) {
+	*stepNum = *stepNum + 1
+	step, err := l.stepStore.Append(ctx, runID, *stepNum, phase, nil, nil)
+	if err != nil {
+		return "", fmt.Errorf("append step: %w", err)
+	}
+	if err := l.stepStore.UpdateStatusWithAttempt(ctx, step.ID, store.StepStatusRunning, nil, nil, 1); err != nil {
+		return "", fmt.Errorf("mark step running: %w", err)
+	}
+
+	out, attempts, stageErr := l.runTextStage(ctx, prompt, userDirective)
+	if attempts <= 0 {
+		attempts = 1
+	}
+	if stageErr != nil {
+		errMsg := stageErr.Error()
+		_ = l.stepStore.UpdateStatusWithAttempt(ctx, step.ID, store.StepStatusError, nil, &errMsg, attempts)
+		return "", stageErr
+	}
+
+	outJSON := mustJSON(map[string]string{"content": out})
+	if err := l.stepStore.UpdateStatusWithAttempt(ctx, step.ID, store.StepStatusOK, outJSON, nil, attempts); err != nil {
+		return "", fmt.Errorf("mark step ok: %w", err)
+	}
+	return out, nil
+}
+
+func (l *Loop) runActStageStep(ctx context.Context, runID string, stepNum *int, toolset *preparedToolset, prompt string) (actStageResult, error) {
+	*stepNum = *stepNum + 1
+	step, err := l.stepStore.Append(ctx, runID, *stepNum, store.StepPhaseAct, nil, nil)
+	if err != nil {
+		return actStageResult{}, fmt.Errorf("append act step: %w", err)
+	}
+	if err := l.stepStore.UpdateStatusWithAttempt(ctx, step.ID, store.StepStatusRunning, nil, nil, 1); err != nil {
+		return actStageResult{}, fmt.Errorf("mark act step running: %w", err)
+	}
+
+	result, stageErr := l.runActStage(ctx, toolset, prompt)
+	attempts := result.Attempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	if stageErr != nil {
+		errMsg := stageErr.Error()
+		_ = l.stepStore.UpdateStatusWithAttempt(ctx, step.ID, store.StepStatusError, nil, &errMsg, attempts)
+		return result, stageErr
+	}
+
+	outJSON := mustJSON(map[string]string{"content": result.Summary})
+	if err := l.stepStore.UpdateStatusWithAttempt(ctx, step.ID, store.StepStatusOK, outJSON, nil, attempts); err != nil {
+		return actStageResult{}, fmt.Errorf("mark act step ok: %w", err)
+	}
+	return result, nil
+}
+
 func (l *Loop) appendTextStep(ctx context.Context, runID string, stepNum *int, phase store.StepPhase, content string) error {
 	*stepNum = *stepNum + 1
 	step, err := l.stepStore.Append(ctx, runID, *stepNum, phase, nil, nil)
 	if err != nil {
 		return err
 	}
+	if err := l.stepStore.UpdateStatusWithAttempt(ctx, step.ID, store.StepStatusRunning, nil, nil, 1); err != nil {
+		return err
+	}
 	out := mustJSON(map[string]string{"content": content})
-	return l.stepStore.UpdateStatus(ctx, step.ID, store.StepStatusOK, out, nil)
+	return l.stepStore.UpdateStatusWithAttempt(ctx, step.ID, store.StepStatusOK, out, nil, 1)
 }
 
 func (l *Loop) renderPrompt(tmpl string, data stageState) string {
@@ -610,6 +685,173 @@ func extractSummaryFromArguments(arguments json.RawMessage) string {
 		return ""
 	}
 	return strings.TrimSpace(payload.Summary)
+}
+
+func normalizeStateJSON(raw string) json.RawMessage {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return mustJSON(map[string]any{
+			"todo":     []map[string]any{},
+			"evidence": []string{},
+			"notes":    []string{},
+		})
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(text), &obj); err == nil {
+		return mustJSON(obj)
+	}
+
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start >= 0 && end > start {
+		if err := json.Unmarshal([]byte(text[start:end+1]), &obj); err == nil {
+			return mustJSON(obj)
+		}
+	}
+
+	return mustJSON(map[string]any{
+		"todo":     []map[string]any{},
+		"evidence": []string{},
+		"notes":    []string{text},
+	})
+}
+
+func mergeStateJSON(existingRaw, updatedRaw json.RawMessage) (json.RawMessage, error) {
+	existing := map[string]any{}
+	if len(existingRaw) > 0 {
+		if err := json.Unmarshal(existingRaw, &existing); err != nil {
+			return nil, fmt.Errorf("parse existing state: %w", err)
+		}
+	}
+
+	updated := map[string]any{}
+	if len(updatedRaw) > 0 {
+		if err := json.Unmarshal(updatedRaw, &updated); err != nil {
+			return nil, fmt.Errorf("parse updated_state: %w", err)
+		}
+	}
+
+	for k, v := range updated {
+		switch k {
+		case "todo":
+			existing[k] = mergeTodo(existing[k], v)
+		case "evidence", "notes":
+			existing[k] = mergeStringLists(existing[k], v)
+		default:
+			existing[k] = v
+		}
+	}
+
+	return mustJSON(existing), nil
+}
+
+func mergeTodo(existingVal, updatedVal any) []map[string]any {
+	existingList := toObjectList(existingVal)
+	updatedList := toObjectList(updatedVal)
+	if len(existingList) == 0 {
+		return updatedList
+	}
+	if len(updatedList) == 0 {
+		return existingList
+	}
+
+	index := make(map[string]int, len(existingList))
+	for i, item := range existingList {
+		if id, _ := item["id"].(string); strings.TrimSpace(id) != "" {
+			index[id] = i
+		}
+	}
+
+	for _, item := range updatedList {
+		id, _ := item["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			existingList = append(existingList, item)
+			continue
+		}
+		if i, ok := index[id]; ok {
+			existingList[i] = mergeObject(existingList[i], item)
+			continue
+		}
+		index[id] = len(existingList)
+		existingList = append(existingList, item)
+	}
+	return existingList
+}
+
+func mergeObject(existing, updated map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range existing {
+		out[k] = v
+	}
+	for k, v := range updated {
+		out[k] = v
+	}
+	return out
+}
+
+func mergeStringLists(existingVal, updatedVal any) []string {
+	existing := toStringList(existingVal)
+	updated := toStringList(updatedVal)
+	if len(existing) == 0 {
+		return updated
+	}
+	if len(updated) == 0 {
+		return existing
+	}
+
+	seen := make(map[string]struct{}, len(existing)+len(updated))
+	out := make([]string, 0, len(existing)+len(updated))
+	for _, s := range existing {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	for _, s := range updated {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func toObjectList(v any) []map[string]any {
+	items, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if m, ok := item.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func toStringList(v any) []string {
+	items, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, strings.TrimSpace(s))
+		}
+	}
+	return out
 }
 
 func (l *Loop) rebuildToolsWithObserver(ws *Workspace) []tool.BaseTool {

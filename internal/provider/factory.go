@@ -31,7 +31,7 @@ func newAnthropicModel(ctx context.Context, cfg config.LLMConfig) (model.ToolCal
 	claudeCfg := &claude.Config{
 		APIKey:    cfg.APIKey,
 		Model:     cfg.Model,
-		MaxTokens: 4096,
+		MaxTokens: cfg.MaxTokens,
 	}
 	if cfg.BaseURL != "" {
 		claudeCfg.BaseURL = &cfg.BaseURL

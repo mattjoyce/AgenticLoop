@@ -125,8 +125,10 @@ func runStart(args []string) error {
 
 	// Create and start API server
 	srv := api.New(api.Config{
-		Listen: cfg.API.Listen,
-		Token:  cfg.API.Token,
+		Listen:                  cfg.API.Listen,
+		Token:                   cfg.API.Token,
+		StreamPollInterval:      cfg.API.StreamPollInterval,
+		StreamHeartbeatInterval: cfg.API.StreamHeartbeatInterval,
 	}, runStore, runner, logger)
 
 	// Signal handling

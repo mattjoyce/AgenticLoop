@@ -8,6 +8,8 @@ database:
 api:
   listen: "127.0.0.1:8090"
   token: "${AGENTICLOOP_API_TOKEN}"
+  stream_poll_interval: 700ms
+  stream_heartbeat_interval: 15s
 
 ductile:
   base_url: "http://127.0.0.1:8080"
@@ -20,6 +22,7 @@ llm:
   provider: openai
   model: gpt-5-nano
   api_key: "${OPENAI_API_KEY}"
+  max_tokens: 4096
 
 agent:
   default_max_loops: 10
@@ -40,13 +43,15 @@ agent:
       <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
       <next_focus source="stage.reflect">{{.NextFocus}}</next_focus>
       <run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
+      <state source="workspace.state">{{.State}}</state>
       </run_context>
-      <output_contract format="markdown">
-      Return concise markdown with:
-      - objective
-      - known facts
-      - unknowns to resolve
-      - success condition
+      <output_contract format="json">
+      Return JSON only:
+      {
+        "todo": [{"id":"T1","task":"string","done":false}],
+        "evidence": ["path-or-fact", "..."],
+        "notes": ["string", "..."]
+      }
       </output_contract>
       </stage>
     plan: |
@@ -59,6 +64,7 @@ agent:
       <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
       <next_focus source="stage.reflect">{{.NextFocus}}</next_focus>
       <run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
+      <state source="workspace.state">{{.State}}</state>
       </run_context>
       <frame_output source="stage.frame">{{.Frame}}</frame_output>
       <output_contract format="markdown">
@@ -74,21 +80,12 @@ agent:
       <constraints source="run.constraints">{{.Constraints}}</constraints>
       <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
       <run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
+      <state source="workspace.state">{{.State}}</state>
       </run_context>
       <frame_output source="stage.frame">{{.Frame}}</frame_output>
       <plan_output source="stage.plan">{{.Plan}}</plan_output>
       <available_tools source="runtime.bound_tools">
-      <tool>sys_internal_ip</tool>
-      <tool>sys_external_ip</tool>
-      <tool>workspace_write — create/overwrite a file (path, content)</tool>
-      <tool>workspace_read — read a file (path, max_lines)</tool>
-      <tool>workspace_list — list directory entries (path)</tool>
-      <tool>workspace_append — append to a file (path, content)</tool>
-      <tool>workspace_edit — preview/edit existing file with regex_replace or line_replace</tool>
-      <tool>workspace_delete — delete a file (path)</tool>
-      <tool>workspace_mkdir — create directory and parents (path)</tool>
-      <tool>report_success</tool>
-      <note>Additional tools may be available at runtime (for example ductile_*).</note>
+      {{.AvailableTools}}
       <note>Workspace tools are sandboxed to the run workspace. Use relative paths only.</note>
       <note>workspace_edit defaults to preview (apply=false); applying requires expected_original_sha256 from preview output.</note>
       <note>Completion requires calling report_success with summary and evidence.</note>
@@ -106,6 +103,7 @@ agent:
       <loop_state iteration="{{.Iteration}}" max_loops="{{.MaxLoops}}"></loop_state>
       <run_memory source="workspace.run_memory">{{.Memory}}</run_memory>
       <loop_memory source="workspace.loop_memory">{{.LoopMemory}}</loop_memory>
+      <state source="workspace.state">{{.State}}</state>
       </run_context>
       <frame_output source="stage.frame">{{.Frame}}</frame_output>
       <plan_output source="stage.plan">{{.Plan}}</plan_output>
@@ -115,6 +113,17 @@ agent:
       </completion_gate>
       <output_contract format="json">
       Return JSON only:
-      {"done": boolean, "summary": "string", "next_focus": "string", "memory_update": "string"}
+      {
+        "next_stage": "plan|act|done",
+        "done": boolean,
+        "summary": "string",
+        "next_focus": "string",
+        "memory_update": "string",
+        "updated_state": {
+          "todo": [{"id":"T1","task":"string","done":true}],
+          "evidence": ["path-or-fact", "..."],
+          "notes": ["string", "..."]
+        }
+      }
       </output_contract>
       </stage>

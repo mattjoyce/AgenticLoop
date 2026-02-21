@@ -67,6 +67,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.API.Listen == "" {
 		cfg.API.Listen = "127.0.0.1:8090"
 	}
+	if cfg.API.StreamPollInterval == 0 {
+		cfg.API.StreamPollInterval = 700 * time.Millisecond
+	}
+	if cfg.API.StreamHeartbeatInterval == 0 {
+		cfg.API.StreamHeartbeatInterval = 15 * time.Second
+	}
+	if cfg.LLM.MaxTokens == 0 {
+		cfg.LLM.MaxTokens = 4096
+	}
 	if cfg.Agent.DefaultMaxLoops == 0 {
 		cfg.Agent.DefaultMaxLoops = 10
 	}
@@ -157,6 +166,15 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Agent.EnqueueTimeout < 0 {
 		return fmt.Errorf("agent.enqueue_timeout must be >= 0")
+	}
+	if cfg.API.StreamPollInterval <= 0 {
+		return fmt.Errorf("api.stream_poll_interval must be positive")
+	}
+	if cfg.API.StreamHeartbeatInterval <= 0 {
+		return fmt.Errorf("api.stream_heartbeat_interval must be positive")
+	}
+	if cfg.LLM.MaxTokens <= 0 {
+		return fmt.Errorf("llm.max_tokens must be positive")
 	}
 	return nil
 }

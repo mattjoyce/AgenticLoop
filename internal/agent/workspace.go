@@ -15,6 +15,7 @@ type Workspace struct {
 	runMemoryPath  string
 	loopMemoryPath string
 	promptPath     string
+	statePath      string
 }
 
 // NewWorkspace creates a workspace directory for a run.
@@ -28,6 +29,7 @@ func NewWorkspace(baseDir, runID string) (*Workspace, error) {
 		runMemoryPath:  filepath.Join(dir, "run_memory.md"),
 		loopMemoryPath: filepath.Join(dir, "loop_memory.md"),
 		promptPath:     filepath.Join(dir, "prompt.md"),
+		statePath:      filepath.Join(dir, "state.json"),
 	}, nil
 }
 
@@ -147,6 +149,26 @@ func (w *Workspace) AppendStagePrompt(iteration int, stage, prompt string) error
 	entry := fmt.Sprintf("\n## Iteration %d - %s Prompt\n\n```text\n%s\n```\n", iteration, stage, prompt)
 	if _, err := f.WriteString(entry); err != nil {
 		return fmt.Errorf("append stage prompt: %w", err)
+	}
+	return nil
+}
+
+// ReadState returns the persisted structured loop state payload.
+func (w *Workspace) ReadState() string {
+	data, err := os.ReadFile(w.statePath)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// WriteState writes structured loop state payload to state.json.
+func (w *Workspace) WriteState(state json.RawMessage) error {
+	if len(state) == 0 {
+		return nil
+	}
+	if err := os.WriteFile(w.statePath, state, 0o644); err != nil {
+		return fmt.Errorf("write state file: %w", err)
 	}
 	return nil
 }

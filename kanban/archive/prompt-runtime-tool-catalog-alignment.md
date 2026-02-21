@@ -1,6 +1,6 @@
 ---
 id: 113
-status: backlog
+status: archive
 priority: Normal
 blocked_by: []
 tags: [prompts, tools, design, agent]
@@ -20,3 +20,4 @@ Remove drift between hardcoded prompt tool lists and actual bound tools so the m
 ## Narrative
 
 - 2026-02-20: Created from repository review; runtime builds a tool catalog but default prompt content still hardcodes tool names, causing potential drift. (by @assistant)
+- 2026-02-20: Updated ACT prompt template to inject `{{.AvailableTools}}` from runtime-bound tool metadata and removed static hardcoded tool entries. Added fixture test in `internal/config/loader_test.go` to validate dynamic tool-catalog rendering contract in `config.yaml`. (by @assistant)

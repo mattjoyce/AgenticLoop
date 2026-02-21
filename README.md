@@ -22,6 +22,7 @@ POST /v1/wake  →  Runner (serial queue)  →  Loop (Frame/Plan/Act/Reflect)
 - **Memory layers**: `run_memory` (cross-iteration) and `loop_memory` (per-iteration transcript)
 - **Loop memory archiving**: Optionally archive each iteration's `loop_memory.md` for per-iteration audit and debugging
 - **Tool integration**: Built-in workspace file tools + Ductile plugin tools via allowlist
+- **Dynamic tool catalog in prompts**: ACT prompt injects runtime-bound tools instead of static hardcoded tool names
 - **Typed Ductile tools**: Fetches plugin schemas from the Ductile discovery API so the LLM receives correct parameter names and types, not a generic payload object
 - **Pluggable LLM**: Anthropic Claude, OpenAI, or Ollama via the [Eino](https://github.com/cloudwego/eino) framework
 - **Completion gate**: Agent must call `report_success` before it can mark itself done
@@ -49,6 +50,8 @@ database:
 api:
   listen: "127.0.0.1:8090"
   token: "${AGENTICLOOP_API_TOKEN}"
+  stream_poll_interval: 700ms
+  stream_heartbeat_interval: 15s
 
 ductile:
   base_url: "http://127.0.0.1:8080"
@@ -61,6 +64,7 @@ llm:
   provider: openai          # openai | anthropic | ollama
   model: gpt-4o-mini
   api_key: "${OPENAI_API_KEY}"
+  max_tokens: 4096          # used by anthropic provider
 
 agent:
   default_max_loops: 10
@@ -89,7 +93,7 @@ go build ./cmd/agenticloop
 ./agenticloop start --config config.yaml
 
 # Watch a live run stream (blue/orange TUI)
-./agenticloop watch --api http://127.0.0.1:8090 --token "$AGENTICLOOP_API_TOKEN" <run_id>
+./agenticloop watch --api http://127.0.0.1:8090 --token "$AGENTICLOOP_API_TOKEN" --poll-interval 2s <run_id>
 ```
 
 ## API
@@ -152,10 +156,16 @@ The reflect stage returns a JSON decision:
 
 ```json
 {
+  "next_stage": "plan",
   "done": false,
   "summary": "...",
   "next_focus": "...",
-  "memory_update": "..."
+  "memory_update": "...",
+  "updated_state": {
+    "todo": [{"id":"T1","task":"...","done":true}],
+    "evidence": ["..."],
+    "notes": ["..."]
+  }
 }
 ```
 
@@ -174,6 +184,8 @@ Path traversal outside the workspace is blocked.
 ### Loop Memory Archiving
 
 When `save_loop_memory: true` is set, `loop_memory.md` (the per-iteration tool call transcript) is copied to `loop_memory_iter_{N}.md` before being cleared at the end of each Reflect stage. This gives a full audit trail of what the LLM saw and did on every iteration, useful for debugging agent behaviour.
+
+Structured loop state is persisted at `state.json` in each run workspace. The FRAME stage refreshes it, and REFLECT can apply incremental updates through `updated_state`.
 
 ## Ductile Tool Integration
 
