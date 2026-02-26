@@ -236,7 +236,7 @@ func (l *Loop) Execute(ctx context.Context, run *store.Run, callbackURL string) 
 			if !state.SuccessReported {
 				state.NextFocus = "Call report_success with summary and evidence before declaring done."
 				l.logger.Info("reflect requested done but report_success not yet called; continuing", "run_id", run.ID, "iteration", iter)
-				nextStage = "plan"
+				nextStage = "frame"
 				continue
 			}
 
